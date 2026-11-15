@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+package creamote.session.v1;
+
+// Messages échangés de bout en bout entre le viewer et le host, À L'INTÉRIEUR
+// du canal chiffré Noise. Le relay ne les voit jamais en clair.
+
+message Permissions {
+  bool view_screen = 1;
+  bool control_input = 2;
+  bool clipboard = 3;
+  bool file_transfer = 4;
+}
+
+message Hello {
+  string display_name = 1;
+  Permissions requested = 2;
+}
+
+message HelloAck {
+  Permissions granted = 1;
+  repeated Display displays = 2;
+}
+
+message Display {
+  uint32 id = 1;
+  string name = 2;
+  uint32 width = 3;
+  uint32 height = 4;
+  float scale = 5;
+  bool primary = 6;
+}
+
+message KeyEvent {
+  // Code de touche physique (USB HID usage).
+  uint32 hid_usage = 1;
+  bool pressed = 2;
+  uint32 modifiers = 3;
+}
+
+message PointerEvent {
+  uint32 display_id = 1;
+  // Coordonnées normalisées [0, 1] relatives à l'écran.
+  float x = 2;
+  float y = 3;
+  uint32 buttons = 4;
+  float wheel_dx = 5;
+  float wheel_dy = 6;
+}
+
+message ClipboardText {
+  string text = 1;
+}
+
+message VideoConfig {
+  enum Codec {
+    CODEC_UNSPECIFIED = 0;
+    CODEC_H264 = 1;
+    CODEC_VP9 = 2;
+    CODEC_AV1 = 3;
+  }
+  uint32 display_id = 1;
+  Codec codec = 2;
+  uint32 width = 3;
+  uint32 height = 4;
+  uint32 target_bitrate_bps = 5;
+  uint32 max_fps = 6;
+}
+
+message SessionMessage {
+  oneof kind {
+    Hello hello = 1;
+    HelloAck hello_ack = 2;
+    KeyEvent key = 3;
+    PointerEvent pointer = 4;
+    ClipboardText clipboard_text = 5;
+    VideoConfig video_config = 6;
+  }
+}

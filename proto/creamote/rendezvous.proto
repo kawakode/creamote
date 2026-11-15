@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+package creamote.rendezvous.v1;
+
+import "creamote/common.proto";
+
+// Messages échangés entre un pair (client/host) et le serveur de rendezvous.
+// Le serveur ne voit jamais le contenu des sessions : uniquement ces messages
+// de mise en relation.
+
+message RegisterPeer {
+  creamote.common.v1.DeviceIdentity identity = 1;
+  creamote.common.v1.Platform platform = 2;
+  creamote.common.v1.Version version = 3;
+  // Adresses locales (LAN) annoncées pour la tentative de connexion directe.
+  repeated string local_addrs = 4;
+}
+
+message RegisterPeerResponse {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_OK = 1;
+    STATUS_ID_CONFLICT = 2;
+    STATUS_RATE_LIMITED = 3;
+    STATUS_VERSION_UNSUPPORTED = 4;
+  }
+  Status status = 1;
+  // ID affiché à l'utilisateur, dérivé de la clé publique.
+  string device_id = 2;
+  // Adresse publique observée par le serveur (réflexion type STUN).
+  string observed_addr = 3;
+  ServerPolicy policy = 4;
+}
+
+// Limites appliquées par le serveur (renseignées en mode public).
+message ServerPolicy {
+  bool public_mode = 1;
+  uint32 max_concurrent_relay_sessions = 2;
+  // 0 = illimité.
+  uint32 max_relay_session_seconds = 3;
+  // 0 = illimité.
+  uint64 max_relay_bitrate_bps = 4;
+}
+
+// Le client demande à joindre un appareil.
+message ConnectRequest {
+  string target_device_id = 1;
+  creamote.common.v1.DeviceIdentity requester = 2;
+  // Ticket signé par le serveur de gestion (mode géré), vide sinon.
+  bytes session_ticket = 3;
+}
+
+// Le serveur relaie l'offre au host, avec les adresses du demandeur.
+message ConnectOffer {
+  bytes session_id = 1;
+  creamote.common.v1.DeviceIdentity requester = 2;
+  string requester_observed_addr = 3;
+  repeated string requester_local_addrs = 4;
+  bytes session_ticket = 5;
+}
+
+message ConnectAnswer {
+  bytes session_id = 1;
+  bool accepted = 2;
+  string host_observed_addr = 3;
+  repeated string host_local_addrs = 4;
+}
+
+// Si le P2P échoue, les deux pairs rejoignent le relay avec ce jeton.
+message RelayGrant {
+  bytes session_id = 1;
+  string relay_addr = 2;
+  bytes relay_token = 3;
+  uint32 expires_in_seconds = 4;
+}
+
+message RendezvousMessage {
+  oneof kind {
+    RegisterPeer register_peer = 1;
+    RegisterPeerResponse register_peer_response = 2;
+    ConnectRequest connect_request = 3;
+    ConnectOffer connect_offer = 4;
+    ConnectAnswer connect_answer = 5;
+    RelayGrant relay_grant = 6;
+  }
+}

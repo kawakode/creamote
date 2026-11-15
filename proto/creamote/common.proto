@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package creamote.common.v1;
+
+// Identité publique d'un appareil (host ou client).
+message DeviceIdentity {
+  // Clé publique Ed25519 (32 octets). Source de vérité de l'identité.
+  bytes signing_public_key = 1;
+  // Clé statique X25519 utilisée par le handshake Noise (32 octets).
+  bytes noise_static_key = 2;
+  // Signature Ed25519 de `noise_static_key` (liaison clé Noise <-> identité).
+  bytes noise_key_signature = 3;
+}
+
+message Version {
+  uint32 major = 1;
+  uint32 minor = 2;
+  uint32 patch = 3;
+}
+
+enum Platform {
+  PLATFORM_UNSPECIFIED = 0;
+  PLATFORM_WINDOWS = 1;
+  PLATFORM_MACOS = 2;
+  PLATFORM_LINUX = 3;
+  PLATFORM_ANDROID = 4;
+}
