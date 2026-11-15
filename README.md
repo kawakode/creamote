@@ -4,7 +4,8 @@ Suite de prise de contrôle à distance multiplateforme (Windows, macOS, Linux, 
 
 | Composant | Rôle |
 | --- | --- |
-| **Client** (`client/`, Flutter) | Se connecter à une machine, ou laisser une machine se connecter à soi (partage ponctuel). |
+| **Client desktop** (`client/`, Tauri) | Windows, macOS, Linux : se connecter à une machine, ou laisser une machine se connecter à soi (partage ponctuel). |
+| **App Android** (`android/`, Kotlin) | Client et host Android, natifs, appuyés sur le cœur Rust via JNI. |
 | **Host** (`host/`, Rust) | Service installé sur une machine destinée à être contrôlée sans surveillance. |
 | **Serveur** (`server/`, Rust) | Rendezvous + relay auto-hébergeable, carnet d'adresses, entités, parcs de machines, RBAC et groupes de sécurité. |
 

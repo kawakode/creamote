@@ -24,8 +24,8 @@ Un rôle (ensemble de permissions) est attribué à un utilisateur ou un groupe 
 | --- | --- |
 | M0 | Workspace, schémas protobuf, identité + Noise, CI 3 OS |
 | M1 | Serveur rendezvous + relay, outil CLI de session chiffrée de test |
-| M2 | Capture, H.264 et input sur Windows, macOS, Linux X11 ; client Flutter desktop minimal |
+| M2 | Capture, H.264 et input sur Windows, macOS, Linux X11 ; client desktop Tauri minimal |
 | M3 | Hole punching P2P, débit adaptatif, multi-écrans, presse-papier, fichiers, Wayland |
 | M4 | Comptes, carnet d'adresses, entités, parcs, RBAC, groupes, tickets signés, audit, console web |
-| M5 | Android : client, host via MediaProjection + AccessibilityService |
+| M5 | App Android native (Kotlin + cœur Rust via JNI) : client, host via MediaProjection + AccessibilityService |
 | M6 | Mode public du serveur officiel, installeurs signés, mise à jour auto, déploiement de masse |
