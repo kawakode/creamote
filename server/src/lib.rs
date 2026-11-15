@@ -1,0 +1,498 @@
+//! Serveur Creamote : rendezvous et relay.
+//!
+//! Un seul endpoint QUIC sert les deux rôles. Le premier message de chaque
+//! flux indique son rôle :
+//! - `RegisterPeer` ouvre un **flux de contrôle** : le pair prouve qu'il
+//!   possède sa clé d'identité, puis échange demandes, offres et jetons ;
+//! - `RelayJoin` ouvre un **flux relay** : une fois les deux pairs présents
+//!   avec leur jeton, le serveur recopie les octets de l'un à l'autre sans
+//!   les interpréter (ils sont chiffrés de bout en bout par Noise).
+//!
+//! En mode public (serveur officiel), la [`Policy`] limite le nombre de
+//! sessions relay simultanées et leur durée.
+
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use creamote_crypto::{DeviceId, PublicIdentity};
+use creamote_net::tls::{ServerCert, ServerPin};
+use creamote_net::{RegisterStatus, RejectReason, frame, ident};
+use creamote_proto::rendezvous::v1::{
+    ConnectAnswer, ConnectOffer, ConnectRejected, ConnectRequest, RegisterPeer,
+    RegisterPeerResponse, RelayGrant, RelayJoin, RendezvousMessage, ServerPolicy,
+    rendezvous_message::Kind,
+};
+use quinn::{RecvStream, SendStream};
+use rand_core::{OsRng, RngCore};
+use tokio::io::Join;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::task::JoinHandle;
+
+type SessionId = [u8; 16];
+type Token = [u8; 32];
+type Pipe = Join<RecvStream, SendStream>;
+
+/// Délai pour envoyer le premier message d'un flux.
+const FIRST_MESSAGE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Durée de vie d'une offre sans réponse.
+const OFFER_TTL: Duration = Duration::from_secs(60);
+
+/// Limites appliquées par le serveur.
+#[derive(Debug, Clone)]
+pub struct Policy {
+    pub public_mode: bool,
+    /// Sessions relay simultanées, 0 = illimité.
+    pub max_relay_sessions: u32,
+    /// Durée maximale d'une session relay, 0 = illimitée.
+    pub max_relay_seconds: u32,
+    /// Délai laissé aux deux pairs pour rejoindre le relay.
+    pub relay_join_timeout: Duration,
+}
+
+impl Policy {
+    /// Serveur auto-hébergé : pas de limite.
+    pub fn private() -> Self {
+        Self {
+            public_mode: false,
+            max_relay_sessions: 0,
+            max_relay_seconds: 0,
+            relay_join_timeout: Duration::from_secs(30),
+        }
+    }
+
+    /// Serveur officiel : valeurs par défaut, ajustables.
+    pub fn public() -> Self {
+        Self {
+            public_mode: true,
+            max_relay_sessions: 200,
+            max_relay_seconds: 30 * 60,
+            relay_join_timeout: Duration::from_secs(30),
+        }
+    }
+
+    fn to_proto(&self) -> ServerPolicy {
+        ServerPolicy {
+            public_mode: self.public_mode,
+            max_concurrent_relay_sessions: self.max_relay_sessions,
+            max_relay_session_seconds: self.max_relay_seconds,
+            max_relay_bitrate_bps: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Config {
+    pub listen: SocketAddr,
+    /// Dossier du certificat ; `None` = certificat éphémère (tests).
+    pub data_dir: Option<PathBuf>,
+    /// Adresse du relay annoncée aux pairs ; `None` = celle du rendezvous.
+    pub relay_addr: Option<String>,
+    pub policy: Policy,
+}
+
+/// Serveur démarré.
+pub struct Server {
+    endpoint: quinn::Endpoint,
+    pin: ServerPin,
+    task: JoinHandle<()>,
+}
+
+impl Server {
+    pub async fn start(config: Config) -> anyhow::Result<Self> {
+        let cert = match &config.data_dir {
+            Some(dir) => ServerCert::load_or_generate(dir)?,
+            None => ServerCert::generate()?,
+        };
+        let pin = cert.pin();
+        let endpoint = quinn::Endpoint::server(cert.quic_server_config()?, config.listen)?;
+
+        let permits = (config.policy.max_relay_sessions > 0)
+            .then(|| Arc::new(Semaphore::new(config.policy.max_relay_sessions as usize)));
+        let state = Arc::new(State {
+            relay_addr: config.relay_addr.unwrap_or_default(),
+            policy: config.policy,
+            permits,
+            peers: Mutex::default(),
+            pending: Mutex::default(),
+            relays: Mutex::default(),
+            next_conn: AtomicU64::new(1),
+        });
+
+        let ep = endpoint.clone();
+        let task = tokio::spawn(async move {
+            while let Some(incoming) = ep.accept().await {
+                let state = state.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = handle_connection(state, incoming).await {
+                        tracing::debug!("connexion terminée : {e}");
+                    }
+                });
+            }
+        });
+        Ok(Self {
+            endpoint,
+            pin,
+            task,
+        })
+    }
+
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.endpoint.local_addr()
+    }
+
+    /// Empreinte à communiquer aux clients.
+    pub fn pin(&self) -> ServerPin {
+        self.pin
+    }
+
+    pub async fn shutdown(self) {
+        self.endpoint.close(0u32.into(), b"arret");
+        self.task.abort();
+        self.endpoint.wait_idle().await;
+    }
+}
+
+struct Peer {
+    identity: PublicIdentity,
+    tx: mpsc::Sender<RendezvousMessage>,
+    conn_id: u64,
+}
+
+struct Pending {
+    host: DeviceId,
+    viewer_tx: mpsc::Sender<RendezvousMessage>,
+    request_id: u64,
+    created: tokio::time::Instant,
+}
+
+struct RelaySlot {
+    tokens: [Token; 2],
+    waiting: Option<(usize, Pipe)>,
+    permit: Option<OwnedSemaphorePermit>,
+}
+
+struct State {
+    policy: Policy,
+    relay_addr: String,
+    permits: Option<Arc<Semaphore>>,
+    peers: Mutex<HashMap<DeviceId, Peer>>,
+    pending: Mutex<HashMap<SessionId, Pending>>,
+    relays: Mutex<HashMap<SessionId, RelaySlot>>,
+    next_conn: AtomicU64,
+}
+
+fn msg(kind: Kind) -> RendezvousMessage {
+    RendezvousMessage { kind: Some(kind) }
+}
+
+fn reject(tx: &mpsc::Sender<RendezvousMessage>, request_id: u64, reason: RejectReason) {
+    let _ = tx.try_send(msg(Kind::ConnectRejected(ConnectRejected {
+        request_id,
+        reason: reason as i32,
+    })));
+}
+
+fn random<const N: usize>() -> [u8; N] {
+    let mut b = [0u8; N];
+    OsRng.fill_bytes(&mut b);
+    b
+}
+
+/// Comparaison en temps constant de deux jetons.
+fn token_eq(a: &[u8], b: &Token) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+async fn handle_connection(state: Arc<State>, incoming: quinn::Incoming) -> anyhow::Result<()> {
+    let conn = incoming.await?;
+    let conn_id = state.next_conn.fetch_add(1, Ordering::Relaxed);
+    loop {
+        let (send, mut recv) = conn.accept_bi().await?;
+        let state = state.clone();
+        let conn = conn.clone();
+        tokio::spawn(async move {
+            let first =
+                tokio::time::timeout(FIRST_MESSAGE_TIMEOUT, frame::read_msg(&mut recv)).await;
+            let result = match first {
+                Ok(Ok(Some(RendezvousMessage {
+                    kind: Some(Kind::RegisterPeer(reg)),
+                }))) => control_stream(state, conn, conn_id, send, recv, reg).await,
+                Ok(Ok(Some(RendezvousMessage {
+                    kind: Some(Kind::RelayJoin(join)),
+                }))) => {
+                    relay_join(state, send, recv, join);
+                    Ok(())
+                }
+                _ => Ok(()),
+            };
+            if let Err(e) = result {
+                tracing::debug!("flux terminé : {e}");
+            }
+        });
+    }
+}
+
+async fn control_stream(
+    state: Arc<State>,
+    conn: quinn::Connection,
+    conn_id: u64,
+    mut send: SendStream,
+    mut recv: RecvStream,
+    reg: RegisterPeer,
+) -> anyhow::Result<()> {
+    let respond = |status: RegisterStatus, device_id: String| RegisterPeerResponse {
+        status: status as i32,
+        device_id,
+        observed_addr: conn.remote_address().to_string(),
+        policy: Some(state.policy.to_proto()),
+    };
+
+    let identity = reg
+        .identity
+        .as_ref()
+        .and_then(|p| ident::from_proto(p).ok())
+        .filter(|id| ident::verify_register_proof(&conn, id, &reg.proof).unwrap_or(false));
+    let Some(identity) = identity else {
+        let r = respond(RegisterStatus::InvalidProof, String::new());
+        frame::write_msg(&mut send, &msg(Kind::RegisterPeerResponse(r))).await?;
+        return Ok(());
+    };
+    let device_id = identity.device_id();
+
+    let (tx, mut rx) = mpsc::channel::<RendezvousMessage>(32);
+    let conflict = {
+        let mut peers = state.peers.lock().expect("verrou sain");
+        // Une même identité qui se reconnecte remplace l'ancienne connexion ;
+        // une autre clé ayant le même ID court est refusée.
+        let conflict = peers
+            .get(&device_id)
+            .is_some_and(|existing| existing.identity != identity);
+        if !conflict {
+            peers.insert(
+                device_id,
+                Peer {
+                    identity: identity.clone(),
+                    tx: tx.clone(),
+                    conn_id,
+                },
+            );
+        }
+        conflict
+    };
+    if conflict {
+        let r = respond(RegisterStatus::IdConflict, device_id.to_string());
+        frame::write_msg(&mut send, &msg(Kind::RegisterPeerResponse(r))).await?;
+        return Ok(());
+    }
+    tracing::info!(%device_id, addr = %conn.remote_address(), "pair enregistré");
+
+    let r = respond(RegisterStatus::Ok, device_id.to_string());
+    frame::write_msg(&mut send, &msg(Kind::RegisterPeerResponse(r))).await?;
+
+    let writer = tokio::spawn(async move {
+        while let Some(m) = rx.recv().await {
+            if frame::write_msg(&mut send, &m).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    while let Ok(Some(m)) = frame::read_msg::<_, RendezvousMessage>(&mut recv).await {
+        match m.kind {
+            Some(Kind::ConnectRequest(req)) => {
+                handle_request(&state, &identity, &conn, &tx, req);
+            }
+            Some(Kind::ConnectAnswer(ans)) => handle_answer(&state, device_id, &tx, ans),
+            _ => tracing::debug!(%device_id, "message inattendu ignoré"),
+        }
+    }
+
+    writer.abort();
+    let mut peers = state.peers.lock().expect("verrou sain");
+    if peers.get(&device_id).is_some_and(|p| p.conn_id == conn_id) {
+        peers.remove(&device_id);
+        tracing::info!(%device_id, "pair déconnecté");
+    }
+    Ok(())
+}
+
+fn handle_request(
+    state: &State,
+    viewer: &PublicIdentity,
+    conn: &quinn::Connection,
+    viewer_tx: &mpsc::Sender<RendezvousMessage>,
+    req: ConnectRequest,
+) {
+    let Some(target) = DeviceId::parse(&req.target_device_id) else {
+        return reject(viewer_tx, req.request_id, RejectReason::InvalidRequest);
+    };
+    let host_tx = {
+        let peers = state.peers.lock().expect("verrou sain");
+        match peers.get(&target) {
+            Some(p) => p.tx.clone(),
+            None => return reject(viewer_tx, req.request_id, RejectReason::TargetOffline),
+        }
+    };
+
+    let session_id: SessionId = random();
+    {
+        let mut pending = state.pending.lock().expect("verrou sain");
+        pending.retain(|_, p| p.created.elapsed() < OFFER_TTL);
+        pending.insert(
+            session_id,
+            Pending {
+                host: target,
+                viewer_tx: viewer_tx.clone(),
+                request_id: req.request_id,
+                created: tokio::time::Instant::now(),
+            },
+        );
+    }
+    let offer = ConnectOffer {
+        session_id: session_id.to_vec(),
+        requester: Some(ident::to_proto(viewer)),
+        requester_observed_addr: conn.remote_address().to_string(),
+        requester_local_addrs: Vec::new(),
+        session_ticket: req.session_ticket,
+    };
+    if host_tx.try_send(msg(Kind::ConnectOffer(offer))).is_err() {
+        state
+            .pending
+            .lock()
+            .expect("verrou sain")
+            .remove(&session_id);
+        reject(viewer_tx, req.request_id, RejectReason::TargetOffline);
+    }
+}
+
+fn handle_answer(
+    state: &Arc<State>,
+    host: DeviceId,
+    host_tx: &mpsc::Sender<RendezvousMessage>,
+    ans: ConnectAnswer,
+) {
+    let Ok(session_id) = SessionId::try_from(ans.session_id.as_slice()) else {
+        return;
+    };
+    let pending = {
+        let mut map = state.pending.lock().expect("verrou sain");
+        match map.get(&session_id) {
+            Some(p) if p.host == host => map.remove(&session_id),
+            _ => None,
+        }
+    };
+    let Some(p) = pending else { return };
+
+    if !ans.accepted {
+        return reject(&p.viewer_tx, p.request_id, RejectReason::Declined);
+    }
+    let permit = match &state.permits {
+        Some(sem) => match sem.clone().try_acquire_owned() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                tracing::warn!("relay plein, session refusée");
+                return reject(&p.viewer_tx, p.request_id, RejectReason::RelayFull);
+            }
+        },
+        None => None,
+    };
+
+    let tokens: [Token; 2] = [random(), random()];
+    state.relays.lock().expect("verrou sain").insert(
+        session_id,
+        RelaySlot {
+            tokens,
+            waiting: None,
+            permit,
+        },
+    );
+    // Libère le créneau si les deux pairs ne se présentent pas à temps.
+    let st = state.clone();
+    let timeout = state.policy.relay_join_timeout;
+    tokio::spawn(async move {
+        tokio::time::sleep(timeout).await;
+        st.relays.lock().expect("verrou sain").remove(&session_id);
+    });
+
+    let grant = |token: &Token, request_id: u64| {
+        msg(Kind::RelayGrant(RelayGrant {
+            session_id: session_id.to_vec(),
+            relay_addr: state.relay_addr.clone(),
+            relay_token: token.to_vec(),
+            expires_in_seconds: timeout.as_secs() as u32,
+            request_id,
+            max_session_seconds: state.policy.max_relay_seconds,
+        }))
+    };
+    let _ = p.viewer_tx.try_send(grant(&tokens[0], p.request_id));
+    let _ = host_tx.try_send(grant(&tokens[1], 0));
+}
+
+fn relay_join(state: Arc<State>, send: SendStream, recv: RecvStream, join: RelayJoin) {
+    let Ok(session_id) = SessionId::try_from(join.session_id.as_slice()) else {
+        return;
+    };
+    let pipe = tokio::io::join(recv, send);
+    let paired = {
+        let mut relays = state.relays.lock().expect("verrou sain");
+        let Some(slot) = relays.get_mut(&session_id) else {
+            return;
+        };
+        let Some(side) = slot
+            .tokens
+            .iter()
+            .position(|t| token_eq(&join.relay_token, t))
+        else {
+            return;
+        };
+        match slot.waiting.take() {
+            Some((other_side, other)) if other_side != side => {
+                let slot = relays.remove(&session_id).expect("présent");
+                Some((other, pipe, slot.permit))
+            }
+            Some(first) => {
+                // Même côté présenté deux fois : on garde le premier.
+                slot.waiting = Some(first);
+                None
+            }
+            None => {
+                slot.waiting = Some((side, pipe));
+                None
+            }
+        }
+    };
+    if let Some((a, b, permit)) = paired {
+        let max = state.policy.max_relay_seconds;
+        tokio::spawn(pump(a, b, permit, max));
+    }
+}
+
+async fn pump(mut a: Pipe, mut b: Pipe, permit: Option<OwnedSemaphorePermit>, max_secs: u32) {
+    tracing::info!("session relay ouverte");
+    let copy = tokio::io::copy_bidirectional(&mut a, &mut b);
+    let outcome = if max_secs > 0 {
+        match tokio::time::timeout(Duration::from_secs(max_secs.into()), copy).await {
+            Ok(r) => r,
+            Err(_) => {
+                tracing::info!("session relay coupée : durée maximale atteinte");
+                drop(permit);
+                return;
+            }
+        }
+    } else {
+        copy.await
+    };
+    match outcome {
+        Ok((ab, ba)) => tracing::info!(
+            octets_aller = ab,
+            octets_retour = ba,
+            "session relay fermée"
+        ),
+        Err(e) => tracing::info!("session relay interrompue : {e}"),
+    }
+    drop(permit);
+}

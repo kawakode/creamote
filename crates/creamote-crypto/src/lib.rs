@@ -7,6 +7,7 @@
 
 pub mod identity;
 pub mod noise;
+pub mod store;
 
 pub use identity::{DeviceId, DeviceIdentity, PublicIdentity};
 pub use noise::{Initiator, Responder, ResponderAwaitingFinish, SecureSession};

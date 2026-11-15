@@ -1,3 +1,19 @@
-# Déploiement
+# Déploiement du serveur
 
-Dockerfile, docker-compose et unités systemd du serveur arriveront avec le rendezvous et le relay (M1).
+Le serveur écoute en **UDP** (QUIC) sur le port 21400 par défaut. Au premier démarrage il génère un certificat dans son dossier de données et affiche son **empreinte** : c'est elle que les hosts et clients utilisent pour authentifier le serveur (`--server-pin`). Conservez le dossier de données, sinon l'empreinte change.
+
+## Docker
+
+```sh
+docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/docker-compose.yml logs creamote-server
+```
+
+## Binaire
+
+```sh
+cargo build --release -p creamote-server
+./target/release/creamote-server --data-dir /var/lib/creamote
+```
+
+Options utiles : `--relay-addr` (adresse publique annoncée pour le relay), `--public` (mode serveur officiel : 200 sessions relay simultanées et 30 min par session par défaut), `--max-relay-sessions`, `--max-relay-seconds`.

@@ -10,9 +10,16 @@ Vue d'ensemble ; les décisions détaillées sont dans `docs/adr/`.
 4. **Repli relay** : en cas d'échec, le serveur délivre un `RelayGrant` ; le relay recopie des octets opaques. Repli TCP/WebSocket 443 si l'UDP est bloqué.
 5. **Handshake Noise XX** entre les deux pairs, à l'intérieur du transport, authentifié par les identités d'appareil (`creamote-crypto`). Les `SessionMessage` circulent ensuite chiffrés.
 
+## Authentification du serveur et des pairs
+
+- **Serveur** : certificat auto-signé conservé dans son dossier de données. Les pairs l'épinglent par son empreinte (BLAKE3 du certificat), communiquée avec l'adresse du serveur. Pas d'autorité de certification.
+- **Enregistrement** : le pair signe avec sa clé d'identité l'exporteur TLS de la connexion QUIC (`RegisterPeer.proof`). La preuve est liée à cette connexion et ne peut pas être rejouée.
+- **Session** : le host et le viewer vérifient l'identité de l'autre à l'issue du handshake Noise, sans faire confiance au serveur. Le viewer vérifie que la clé authentifiée correspond à l'ID demandé ; le host, qu'elle correspond au demandeur annoncé.
+- **Relay** : deux jetons aléatoires de 256 bits par session, un par côté, valables 30 s. Le relay apparie les deux flux et recopie des octets opaques.
+
 ## Serveur officiel et serveurs custom
 
-Un seul binaire `creamote-server`. En mode `public` il applique une `ServerPolicy` : sessions relay simultanées plafonnées, durée maximale par session relay, débit plafonné, limitation de l'enregistrement d'IDs. Client et host conservent une liste de serveurs, chacun épinglé par sa clé publique.
+Un seul binaire `creamote-server`. En mode `public` il applique une `ServerPolicy` : sessions relay simultanées plafonnées (200 par défaut) et durée maximale par session relay (30 min par défaut), toutes deux réglables. Le plafond de débit, les limites par appareil/IP et la limitation de l'enregistrement d'IDs arrivent en M6. Client et host conservent une liste de serveurs, chacun épinglé par son empreinte.
 
 ## Gestion de parc (M4)
 

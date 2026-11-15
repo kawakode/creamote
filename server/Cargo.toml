@@ -6,8 +6,27 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "creamote-server"
+path = "src/main.rs"
+
 [dependencies]
 creamote-proto.workspace = true
+creamote-crypto.workspace = true
+creamote-net.workspace = true
+rand_core.workspace = true
+tokio.workspace = true
+quinn.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+creamote-crypto.workspace = true
 
 [lints]
 workspace = true
