@@ -3,6 +3,11 @@
 .DS_Store
 .idea/
 .vscode/
-# Flutter (client/)
-client/.dart_tool/
-client/build/
+# Tauri (client/)
+client/node_modules/
+client/dist/
+# Android (android/)
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties

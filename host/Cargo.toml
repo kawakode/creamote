@@ -1,0 +1,13 @@
+[package]
+name = "creamote-host"
+description = "Host Creamote : service qui rend une machine contrôlable à distance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+creamote-crypto.workspace = true
+
+[lints]
+workspace = true
