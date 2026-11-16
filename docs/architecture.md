@@ -41,6 +41,18 @@ Crate `creamote-transfer`, dans le canal Noise, avec les numéros 20 à 39 de `S
 - **Débit** (`creamote-session::rate`) : le host date chaque image envoyée et son accusé ; la file d'attente réseau est estimée par l'écart entre ce délai et le plus faible délai récent. Au-delà de 80 ms le débit de l'encodeur baisse de 25 % (au plus une fois par seconde, plancher 300 kbit/s) ; après 3 s sans file et si l'encodeur produit, il remonte de 10 % jusqu'au débit initial. Un écran statique ne fait donc pas monter le débit, et une latence constante (liaison lointaine) n'est pas prise pour de la congestion. Chaque changement est annoncé par un nouveau `VideoConfig`.
 - **Écrans** : le host relit la liste des écrans toutes les 2 s et envoie `DisplayList` quand elle change (écran branché, débranché, résolution). Si la capture de l'écran diffusé échoue, il repasse sur l'écran principal (au plus une tentative toutes les 5 s) et les entrées suivent. Le viewer choisit l'écran par `VideoConfig.display_id` (liste dans le client, `--display` dans la CLI).
 
+## Wayland (M3)
+
+Wayland n'autorise ni capture ni injection directes : le host passe par **xdg-desktop-portal** (D-Bus, `zbus`), qui délègue au compositeur (GNOME, KDE, wlroots selon le backend installé).
+
+- **Une seule session `RemoteDesktop`** avec les sources `ScreenCast` : une seule boîte de dialogue pour les écrans et le clavier/souris, ouverte après le consentement Creamote. Le portail renvoie un **jeton de restauration** (`persist_mode` = jusqu'à révocation), gardé dans `$XDG_STATE_HOME/creamote/portal-restore-token` (0600) : les sessions suivantes, y compris sans surveillance, ne redemandent rien tant que l'utilisateur n'a pas révoqué l'accès.
+- **Image** : un flux PipeWire par écran (`OpenPipeWireRemote` puis `libpipewire`), mémoire partagée BGRx/BGRA (RGBx/RGBA convertis), curseur incrusté si le compositeur le propose. L'identifiant d'écran est le nœud PipeWire.
+- **Entrées** : `NotifyKeyboardKeycode` (codes evdev), `NotifyPointerMotionAbsolute` en coordonnées logiques du flux diffusé, `NotifyPointerButton`, `NotifyPointerAxisDiscrete`.
+- **Durée de vie** : la session est partagée par la capture et l'injection et fermée 15 s après la dernière utilisation (l'indicateur de partage disparaît). Si l'utilisateur révoque le partage, la capture échoue, la session est marquée fermée et le repli sur l'écran principal en rouvre une.
+- **Détection** : `XDG_SESSION_TYPE=wayland` ou `WAYLAND_DISPLAY` ; `CREAMOTE_LINUX_BACKEND=x11|portal` force le choix. Fonction `wayland` du host (par défaut), qui lie `libpipewire-0.3` ; le client n'en dépend pas.
+- **Limites** : la liste des écrans est celle choisie dans la boîte (pas de branchement à chaud) ; le host doit tourner dans la session graphique de l'utilisateur (bus D-Bus de session) ; pas encore de DMA-BUF (zéro-copie).
+- **Test** : `tools/wayland-lab.sh` (job CI) lance un bus D-Bus privé, PipeWire, WirePlumber et une source GStreamer ; le test sert lui-même un faux portail et vérifie les appels D-Bus, l'image reçue, les entrées, la fermeture et le jeton de restauration.
+
 ## Serveur officiel et serveurs custom
 
 Un seul binaire `creamote-server`. En mode `public` il applique une `ServerPolicy` (au relay seulement, une connexion directe ne coûtant rien au serveur) : **une session relay à la fois par adresse IP du demandeur**, **10 minutes maximum par session** et 200 sessions au total, valeurs réglables. Le serveur officiel n'offre pas la gestion de parc (comptes, entités, RBAC) : elle est réservée aux serveurs auto-hébergés. Le plafond de débit et la limitation de l'enregistrement d'IDs arrivent en M6. Client et host conservent une liste de serveurs, chacun épinglé par son empreinte.
@@ -53,7 +65,7 @@ Un rôle (ensemble de permissions) est attribué à un utilisateur ou un groupe 
 
 ## Session desktop (M2)
 
-- **Capture** (`creamote-capture`) : API natives seulement, image BGRA livrée quand l'écran change. Windows : DXGI Desktop Duplication ; macOS : ScreenCaptureKit ; Linux X11 : MIT-SHM avec repli `GetImage`, curseur via XFixes. Wayland (portail + PipeWire) arrive en M3.
+- **Capture** (`creamote-capture`) : API natives seulement, image BGRA livrée quand l'écran change. Windows : DXGI Desktop Duplication ; macOS : ScreenCaptureKit ; Linux X11 : MIT-SHM avec repli `GetImage`, curseur via XFixes ; Wayland : voir ci-dessous.
 - **Encodage** (`creamote-codec`) : H.264 Annex B sans images B. Windows : MFT Media Foundation matériels du constructeur (Quick Sync, NVENC, AMF), puis encodeur Microsoft ; macOS : VideoToolbox ; Linux et machines sans encodeur matériel : openh264. Un encodeur qui échoue en cours de session passe la main au suivant (image clé forcée).
 - **Entrées** (`creamote-input`) : touches physiques (usages USB HID, comme `KeyboardEvent.code`), pointeur en coordonnées normalisées sur l'écran diffusé. Windows : `SendInput` en scancodes ; macOS : `CGEventPost` ; X11 : XTest. Tout ce qui est enfoncé est relâché en fin de session.
 - **Session** (`creamote-session`) : `Hello` → consentement éventuel → `HelloAck` (permissions accordées, écrans) → `VideoConfig` → flux de `VideoChunk`. Le viewer acquitte chaque image décodée ; le host ne garde que 3 images en vol, ce qui borne la latence quand le réseau sature. Les entrées ne sont injectées que si `control` est accordé.

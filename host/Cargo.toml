@@ -12,6 +12,7 @@ creamote-crypto.workspace = true
 creamote-net.workspace = true
 creamote-proto.workspace = true
 creamote-capture.workspace = true
+creamote-input.workspace = true
 creamote-codec.workspace = true
 creamote-session.workspace = true
 tokio.workspace = true
@@ -22,6 +23,12 @@ anyhow.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
+[features]
+default = ["wayland"]
+# Wayland (portail + PipeWire) ; nécessite libpipewire-0.3 à la compilation
+# et à l'exécution.
+wayland = ["creamote-capture/wayland", "creamote-input/wayland"]
 
 [lints]
 workspace = true

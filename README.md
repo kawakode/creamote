@@ -21,7 +21,7 @@ Milestone **M1 : rendezvous et relay**. Voir [docs/architecture.md](docs/archite
 - `crates/creamote-net` : QUIC avec certificat de serveur épinglé, client de rendezvous, connexion directe entre pairs (LAN, hole punching UDP) avec repli sur le relay, canal chiffré de bout en bout.
 - `crates/creamote-transfer` : presse-papier partagé (API natives de chaque OS) et transfert de fichiers dans la session chiffrée.
 - `server/` : rendezvous + relay, mode public avec limites (voir [deploy/](deploy/README.md)), et gestion de parc : comptes, entités, parcs, groupes de sécurité, RBAC et audit, via une [API HTTP](docs/api.md) et une console web d'administration intégrée, sur SQLite ou PostgreSQL ; enrôlement des machines et tickets de session signés.
-- `crates/creamote-capture` : capture d'écran native (DXGI Desktop Duplication, ScreenCaptureKit, X11 MIT-SHM).
+- `crates/creamote-capture` : capture d'écran native (DXGI Desktop Duplication, ScreenCaptureKit, X11 MIT-SHM, portail Wayland + PipeWire).
 - `crates/creamote-codec` : encodage H.264 par les encodeurs matériels natifs (Media Foundation, VideoToolbox), openh264 en repli.
 - `crates/creamote-input` : injection clavier/souris native (SendInput, CGEvent, XTest), touches physiques USB HID.
 - `crates/creamote-session` : session de bout en bout (vidéo, entrées, consentement, contrôle de flux).
@@ -42,7 +42,9 @@ Le host affiche une demande de connexion (contrôle, vue seule ou refus) avec le
 
 Le presse-papier est partagé et le host accepte les fichiers dans `Téléchargements/Creamote` (`--no-clipboard`, `--no-files`, `--files-dir` pour changer cela) ; côté CLI, `--clipboard`, `--send <fichier ou dossier>` et `--files-dir <dossier>` pour recevoir. `--display <id>` choisit l'écran diffusé ; le débit s'adapte au réseau.
 
-`sudo tools/nat-lab.sh cone|symmetric|same-lan` (Linux) rejoue une session entre deux machines derrière des NAT simulés.
+`sudo tools/nat-lab.sh cone|symmetric|same-lan` (Linux) rejoue une session entre deux machines derrière des NAT simulés. `tools/wayland-lab.sh` teste la capture et les entrées Wayland face à un faux portail et un vrai PipeWire.
+
+Sous Linux, le host prend en charge Wayland par défaut : il faut `libpipewire-0.3` (paquet `libpipewire-0.3-dev` et `clang` pour compiler), et le host doit tourner dans la session de l'utilisateur. `cargo build -p creamote-host --no-default-features` donne un host X11 seul.
 
 ## Développement
 

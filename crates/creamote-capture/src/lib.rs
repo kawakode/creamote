@@ -4,7 +4,8 @@
 //! | --- | --- | --- |
 //! | Windows | DXGI Desktop Duplication | images livrées seulement quand l'écran change |
 //! | macOS | ScreenCaptureKit (12.3+) | curseur inclus, autorisation « Enregistrement de l'écran » |
-//! | Linux X11 | MIT-SHM (repli `GetImage`), XFixes pour le curseur | Wayland : M3 |
+//! | Linux X11 | MIT-SHM (repli `GetImage`), XFixes pour le curseur | |
+//! | Linux Wayland | portail `RemoteDesktop`/`ScreenCast` + PipeWire | boîte du portail, puis jeton de restauration |
 //!
 //! Les images sont livrées en BGRA 8 bits en mémoire, prêtes pour
 //! l'encodeur. Le zéro-copie GPU → encodeur viendra avec le débit adaptatif.
@@ -15,6 +16,8 @@ use std::time::{Duration, Instant};
 mod dxgi;
 #[cfg(target_os = "macos")]
 mod sck;
+#[cfg(all(target_os = "linux", feature = "wayland"))]
+pub mod wayland;
 #[cfg(target_os = "linux")]
 mod x11;
 
@@ -122,6 +125,10 @@ pub fn init() {
 
 /// Écrans disponibles, l'écran principal en premier.
 pub fn displays() -> Result<Vec<DisplayInfo>> {
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
+    if wayland::active() {
+        return wayland::displays();
+    }
     let mut d = platform::displays()?;
     d.sort_by_key(|d| !d.primary);
     Ok(d)
@@ -137,6 +144,10 @@ pub fn open(display_id: Option<u32>) -> Result<Box<dyn Capturer>> {
             .find(|d| d.id == id)
             .ok_or(CaptureError::UnknownDisplay(id))?,
     };
+    #[cfg(all(target_os = "linux", feature = "wayland"))]
+    if wayland::active() {
+        return wayland::open(display);
+    }
     platform::open(display)
 }
 
