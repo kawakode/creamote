@@ -89,11 +89,14 @@ for _ in $(seq 50); do grep -q Empreinte "$WORK/server.log" 2>/dev/null && break
 PIN=$(awk '/Empreinte/ {print $NF}' "$WORK/server.log")
 
 (cd "$WORK" && x cl-host "$BIN/creamote-host" --server 203.0.113.1:21400 --server-pin "$PIN" \
+    --unattended-dev \
     >"$WORK/host.log" 2>&1) &
 for _ in $(seq 50); do grep -q "En ligne" "$WORK/host.log" 2>/dev/null && break; sleep 0.1; done
 ID=$(awk -F' : ' '/ID de l.appareil/ {print $2}' "$WORK/host.log")
 
-(printf 'bonjour\n'; sleep 8) | (cd "$WORK" && x cl-viewer "$BIN/creamote-cli" connect "$ID" \
+# Seul l'établissement du chemin est vérifié : sans écran dans l'espace de
+# noms, la capture peut échouer ensuite.
+(cd "$WORK" && x cl-viewer timeout 30 "$BIN/creamote-cli" view "$ID" --seconds 3 \
     --server 203.0.113.1:21400 --server-pin "$PIN") >"$WORK/viewer.log" 2>&1 || true
 
 fail() {
@@ -106,7 +109,7 @@ fail() {
     echo "ÉCHEC ($MODE) : $1"
     exit 1
 }
-grep -q "écho : bonjour" "$WORK/viewer.log" || fail "pas d'écho"
+grep -q "chiffré de bout en bout" "$WORK/viewer.log" || fail "pas de session chiffrée"
 case "$MODE" in
     cone | same-lan) want="Connexion directe." ;;
     symmetric) want="Connexion via le relay." ;;

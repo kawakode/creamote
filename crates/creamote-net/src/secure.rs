@@ -1,8 +1,10 @@
 //! Canal chiffré de bout en bout au-dessus d'un flux quelconque.
 
 use creamote_crypto::noise::MAX_NOISE_MSG_LEN;
+use std::sync::{Arc, Mutex};
+
 use creamote_crypto::{DeviceIdentity, Initiator, PublicIdentity, Responder, SecureSession};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 
 use crate::{NetError, Result, frame};
 
@@ -77,6 +79,79 @@ impl<T: AsyncRead + AsyncWrite + Unpin> SecureChannel<T> {
         self.io.shutdown().await?;
         Ok(())
     }
+
+    /// Sépare le canal en une moitié d'émission et une moitié de réception,
+    /// utilisables depuis deux tâches (vidéo sortante et entrées entrantes).
+    pub fn split(self) -> (SecureSender<WriteHalf<T>>, SecureReceiver<ReadHalf<T>>) {
+        let code = self.verification_code();
+        let (r, w) = tokio::io::split(self.io);
+        let session = Arc::new(Mutex::new(self.session));
+        (
+            SecureSender {
+                io: w,
+                session: session.clone(),
+            },
+            SecureReceiver {
+                io: r,
+                session,
+                remote: self.remote,
+                verification_code: code,
+            },
+        )
+    }
+}
+
+/// Moitié d'émission d'un [`SecureChannel`].
+pub struct SecureSender<W> {
+    io: W,
+    session: Arc<Mutex<SecureSession>>,
+}
+
+impl<W: AsyncWrite + Unpin> SecureSender<W> {
+    pub async fn send(&mut self, plaintext: &[u8]) -> Result<()> {
+        let c = lock(&self.session).encrypt(plaintext)?;
+        frame::write_raw(&mut self.io, &c).await?;
+        self.io.flush().await?;
+        Ok(())
+    }
+
+    pub async fn close(mut self) -> Result<()> {
+        self.io.shutdown().await?;
+        Ok(())
+    }
+}
+
+/// Moitié de réception d'un [`SecureChannel`].
+pub struct SecureReceiver<R> {
+    io: R,
+    session: Arc<Mutex<SecureSession>>,
+    remote: PublicIdentity,
+    verification_code: String,
+}
+
+impl<R: AsyncRead + Unpin> SecureReceiver<R> {
+    pub fn remote(&self) -> &PublicIdentity {
+        &self.remote
+    }
+
+    pub fn verification_code(&self) -> &str {
+        &self.verification_code
+    }
+
+    /// Prochain message ; `Ok(None)` si le pair a fermé le canal. Pas
+    /// annulable sans perte : à appeler depuis une tâche dédiée.
+    pub async fn recv(&mut self) -> Result<Option<Vec<u8>>> {
+        match frame::read_raw(&mut self.io, MAX_NOISE_MSG_LEN).await? {
+            Some(c) => Ok(Some(lock(&self.session).decrypt(&c)?)),
+            None => Ok(None),
+        }
+    }
+}
+
+/// Les deux sens utilisent des nonces distincts de la même session Noise : le
+/// verrou ne protège que l'état, jamais pendant une entrée/sortie.
+fn lock(s: &Mutex<SecureSession>) -> std::sync::MutexGuard<'_, SecureSession> {
+    s.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 async fn read_noise<T: AsyncRead + Unpin>(io: &mut T) -> Result<Vec<u8>> {
@@ -110,5 +185,40 @@ mod tests {
 
         v.close().await.unwrap();
         assert!(h.recv().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn split_halves_work_concurrently() {
+        let (a, b) = tokio::io::duplex(1 << 20);
+        let viewer = DeviceIdentity::generate();
+        let host = DeviceIdentity::generate();
+        let (v, h) = tokio::join!(
+            SecureChannel::initiate(a, &viewer),
+            SecureChannel::respond(b, &host)
+        );
+        let (mut vs, mut vr) = v.unwrap().split();
+        let (mut hs, mut hr) = h.unwrap().split();
+        assert_eq!(vr.verification_code(), hr.verification_code());
+        assert_eq!(hr.remote(), viewer.public());
+
+        let host_task = tokio::spawn(async move {
+            for i in 0..100u32 {
+                hs.send(&i.to_le_bytes()).await.unwrap();
+            }
+            let mut n = 0;
+            while let Some(m) = hr.recv().await.unwrap() {
+                assert_eq!(m, (n as u32).to_le_bytes());
+                n += 1;
+            }
+            n
+        });
+        for i in 0..50u32 {
+            vs.send(&i.to_le_bytes()).await.unwrap();
+        }
+        for i in 0..100u32 {
+            assert_eq!(vr.recv().await.unwrap().unwrap(), i.to_le_bytes());
+        }
+        vs.close().await.unwrap();
+        assert_eq!(host_task.await.unwrap(), 50);
     }
 }

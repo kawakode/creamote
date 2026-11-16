@@ -752,7 +752,8 @@ async fn devices_and_tickets_follow_rbac() {
     .unwrap();
     assert_eq!(t.user_email, api.email("bob"));
     assert_eq!(t.entity_id, eid);
-    // Sans `unattended`, un host enrôlé refuse la session sans surveillance.
+    // Sans `unattended`, un host enrôlé exige le consentement de
+    // l'utilisateur présent.
     let enrollment = ticket::Enrollment {
         ticket_key: *server_key,
         server: String::new(),
@@ -768,7 +769,7 @@ async fn devices_and_tickets_follow_rbac() {
             viewer.public(),
             ticket::unix_now()
         ),
-        ticket::Decision::Decline(ticket::TicketError::Insufficient(_))
+        ticket::Decision::AcceptWithConsent(_)
     ));
     let (s, _) = api
         .post(
