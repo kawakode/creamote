@@ -1,22 +1,26 @@
 //! Host Creamote.
 //!
 //! S'enregistre auprès d'un serveur et accepte les sessions entrantes via le
-//! relay. Chaque session établit un canal Noise de bout en bout puis, en
-//! attendant la capture d'écran (M2), renvoie en écho les messages reçus.
+//! relay. Chaque session établit un canal Noise de bout en bout, puis diffuse
+//! l'écran (capture et encodage H.264 natifs) et injecte clavier et souris
+//! selon les permissions accordées.
 //!
 //! - **Host enrôlé** dans un parc (`--enroll <jeton>`) : une session n'est
 //!   acceptée que sur présentation d'un ticket signé par le serveur, émis
-//!   pour ce host et pour l'appareil qui se connecte, et accordant
-//!   `view_screen` + `unattended`.
-//! - **Host non enrôlé** (mode développement) : toute demande est acceptée.
-//!   Le consentement de l'utilisateur présent arrive avec M2.
+//!   pour ce host et pour l'appareil qui se connecte. Avec `unattended`, elle
+//!   s'ouvre sans intervention ; sinon l'utilisateur présent doit consentir.
+//! - **Host non enrôlé** : toute demande est soumise au consentement de
+//!   l'utilisateur présent (`--unattended-dev` le désactive, pour les tests).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+mod consent;
+
 use anyhow::Context;
 use clap::Parser;
+use creamote_codec::Preference;
 use creamote_crypto::{DeviceIdentity, PublicIdentity, store};
 use creamote_net::ident;
 use creamote_net::relay::RelayStream;
@@ -24,6 +28,8 @@ use creamote_net::rendezvous::{Event, RendezvousClient};
 use creamote_net::secure::SecureChannel;
 use creamote_net::ticket::{self, Decision, Enrollment};
 use creamote_net::tls::ServerPin;
+use creamote_proto::permissions::Permissions;
+use creamote_session::host::{self, Media, Policy};
 
 #[derive(Parser)]
 #[command(version, about = "Host Creamote")]
@@ -47,6 +53,14 @@ struct Args {
     /// Nom affiché de la machine à l'enrôlement (par défaut, son ID).
     #[arg(long, requires = "enroll")]
     name: Option<String>,
+    /// Encodeur vidéo : `auto` (matériel si possible) ou `software`.
+    #[arg(long, default_value = "auto")]
+    encoder: Preference,
+    /// Host non enrôlé seulement : accepte les sessions sans demander à
+    /// l'utilisateur présent. Pour les tests ; ne l'utilisez pas sur un poste
+    /// réel.
+    #[arg(long)]
+    unattended_dev: bool,
 }
 
 #[tokio::main]
@@ -57,6 +71,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     let args = Args::parse();
+    creamote_capture::init();
 
     let (identity, created) = store::load_or_create(&args.identity_file)
         .with_context(|| format!("identité {}", args.identity_file.display()))?;
@@ -113,26 +128,72 @@ async fn main() -> anyhow::Result<()> {
             e.server
         );
     }
+    anyhow::ensure!(
+        !(args.unattended_dev && enrollment.is_some()),
+        "--unattended-dev est réservé aux hosts non enrôlés"
+    );
     match &enrollment {
         Some(e) => println!(
             "Enrôlé dans « {} » / parc « {} » : sessions sur ticket uniquement.",
             e.entity_name, e.fleet_name
         ),
-        None => println!("Non enrôlé : mode développement, toute demande est acceptée."),
+        None if args.unattended_dev => {
+            println!("Non enrôlé, --unattended-dev : toute demande est acceptée SANS consentement.")
+        }
+        None => println!("Non enrôlé : chaque demande est soumise à l'utilisateur présent."),
     }
-    serve(rv, addr, pin, Arc::new(identity), enrollment).await
+    let ctx = Ctx {
+        identity: Arc::new(identity),
+        pin,
+        enrollment,
+        media: Media::native(args.encoder),
+        unattended_dev: args.unattended_dev,
+    };
+    serve(rv, addr, ctx).await
+}
+
+struct Ctx {
+    identity: Arc<DeviceIdentity>,
+    pin: ServerPin,
+    enrollment: Option<Enrollment>,
+    media: Media,
+    unattended_dev: bool,
+}
+
+impl Ctx {
+    /// Règles de session selon la décision prise sur le ticket.
+    fn policy(&self, decision: Decision) -> Result<Policy, ticket::TicketError> {
+        let prompt = || Some(Arc::new(consent::ask) as host::ConsentPrompt);
+        Ok(match decision {
+            Decision::AcceptUnmanaged => Policy {
+                allowed: Permissions::ALL,
+                consent: if self.unattended_dev { None } else { prompt() },
+                user_email: None,
+            },
+            Decision::Accept(t) => Policy {
+                allowed: Permissions::from_bits_truncate(t.permissions),
+                consent: None,
+                user_email: Some(t.user_email),
+            },
+            Decision::AcceptWithConsent(t) => Policy {
+                allowed: Permissions::from_bits_truncate(t.permissions),
+                consent: prompt(),
+                user_email: Some(t.user_email),
+            },
+            Decision::Decline(e) => return Err(e),
+        })
+    }
 }
 
 async fn serve(
     mut rv: RendezvousClient,
     addr: std::net::SocketAddr,
-    pin: ServerPin,
-    identity: Arc<DeviceIdentity>,
-    enrollment: Option<Enrollment>,
+    ctx: Ctx,
 ) -> anyhow::Result<()> {
     println!("En ligne sur {addr}, en attente de connexions.");
+    let ctx = Arc::new(ctx);
 
-    let mut offers: HashMap<Vec<u8>, PublicIdentity> = HashMap::new();
+    let mut offers: HashMap<Vec<u8>, (PublicIdentity, Policy)> = HashMap::new();
     while let Some(event) = rv.next_event().await? {
         match event {
             Event::Offer(offer) => {
@@ -145,9 +206,9 @@ async fn serve(
                     continue;
                 };
                 let decision = ticket::decide(
-                    enrollment.as_ref(),
+                    ctx.enrollment.as_ref(),
                     &offer.session_ticket,
-                    identity.public(),
+                    ctx.identity.public(),
                     &requester,
                     ticket::unix_now(),
                 );
@@ -156,29 +217,39 @@ async fn serve(
                     requester.device_id(),
                     requester.fingerprint()
                 );
-                match decision {
-                    Decision::AcceptUnmanaged => println!("Demande de {who} : acceptée"),
-                    Decision::Accept(t) => {
-                        println!("Demande de {who} pour {} : acceptée", t.user_email)
-                    }
-                    Decision::Decline(e) => {
+                let policy = match ctx.policy(decision) {
+                    Ok(p) => p,
+                    Err(e) => {
                         println!("Demande de {who} : refusée ({e})");
                         rv.answer(&offer, false).await?;
                         continue;
                     }
-                }
+                };
+                let account = policy
+                    .user_email
+                    .as_deref()
+                    .map(|e| format!(" pour {e}"))
+                    .unwrap_or_default();
+                let mode = if policy.consent.is_some() {
+                    "soumise à l'utilisateur présent"
+                } else {
+                    "acceptée sans surveillance"
+                };
+                println!("Demande de {who}{account} : {mode}");
                 rv.answer(&offer, true).await?;
-                offers.insert(offer.session_id.clone(), requester);
+                offers.insert(offer.session_id.clone(), (requester, policy));
             }
             Event::Grant(grant) => {
-                let Some(expected) = offers.remove(&grant.session_id) else {
+                let Some((expected, policy)) = offers.remove(&grant.session_id) else {
                     continue;
                 };
                 let relay = rv.relay_addr(&grant)?;
-                let identity = identity.clone();
+                let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = echo_session(relay, pin, grant, expected, identity).await {
-                        eprintln!("Session interrompue : {e:#}");
+                    let who = expected.device_id().to_string();
+                    match session(relay, grant, expected, policy, &ctx).await {
+                        Ok(s) => println!("Session avec {who} terminée ({:?}).", s.granted),
+                        Err(e) => eprintln!("Session avec {who} interrompue : {e:#}"),
                     }
                 });
             }
@@ -189,29 +260,38 @@ async fn serve(
     Ok(())
 }
 
-async fn echo_session(
+/// Ouvre le canal chiffré de bout en bout avec le viewer et vérifie son
+/// identité.
+async fn open_channel(
     relay: std::net::SocketAddr,
     pin: ServerPin,
-    grant: creamote_net::rendezvous::RelayGrant,
-    expected: PublicIdentity,
-    identity: Arc<DeviceIdentity>,
-) -> anyhow::Result<()> {
-    let stream = RelayStream::join(relay, pin, &grant).await?;
-    let mut chan = SecureChannel::respond(stream, &identity).await?;
+    grant: &creamote_net::rendezvous::RelayGrant,
+    expected: &PublicIdentity,
+    identity: &DeviceIdentity,
+) -> anyhow::Result<SecureChannel<RelayStream>> {
+    let stream = RelayStream::join(relay, pin, grant).await?;
+    let chan = SecureChannel::respond(stream, identity).await?;
     // Le serveur a annoncé une identité ; Noise prouve celle du pair réel.
     anyhow::ensure!(
-        chan.remote() == &expected,
+        chan.remote() == expected,
         "l'identité authentifiée ne correspond pas à celle annoncée par le serveur"
     );
+    Ok(chan)
+}
+
+async fn session(
+    relay: std::net::SocketAddr,
+    grant: creamote_net::rendezvous::RelayGrant,
+    expected: PublicIdentity,
+    policy: Policy,
+    ctx: &Ctx,
+) -> anyhow::Result<host::Summary> {
+    let chan = open_channel(relay, ctx.pin, &grant, &expected, &ctx.identity).await?;
     println!(
         "Session chiffrée avec {} — code de vérification {}",
         expected.device_id(),
         chan.verification_code()
     );
-    while let Some(m) = chan.recv().await? {
-        let text = String::from_utf8_lossy(&m);
-        chan.send(format!("écho : {text}").as_bytes()).await?;
-    }
-    println!("Session avec {} terminée.", expected.device_id());
-    Ok(())
+    let (tx, rx) = chan.split();
+    Ok(host::serve(tx, rx, policy, ctx.media.clone()).await?)
 }

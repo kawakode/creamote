@@ -43,7 +43,10 @@ message PointerEvent {
   // Coordonnées normalisées [0, 1] relatives à l'écran.
   float x = 2;
   float y = 3;
+  // Boutons enfoncés, comme MouseEvent.buttons : 1 gauche, 2 droit,
+  // 4 milieu, 8 précédent, 16 suivant.
   uint32 buttons = 4;
+  // Molette, en crans (1.0 = un cran). Positif : vers la droite / vers le bas.
   float wheel_dx = 5;
   float wheel_dy = 6;
 }
@@ -65,8 +68,59 @@ message VideoConfig {
   uint32 height = 4;
   uint32 target_bitrate_bps = 5;
   uint32 max_fps = 6;
+  // Envoyé par le host : encodeur effectivement utilisé (informatif), ex.
+  // « Media Foundation (Intel® Quick Sync Video H.264 Encoder MFT) ».
+  string encoder = 7;
 }
 
+// Morceau d'une image encodée (host → viewer). Une image dépasse souvent la
+// taille maximale d'un message Noise : elle est découpée en morceaux
+// consécutifs, `chunk_index` de 0 à `chunk_count - 1`. H.264 au format Annex B,
+// avec SPS/PPS en tête de chaque image clé.
+message VideoChunk {
+  uint32 display_id = 1;
+  uint64 frame_id = 2;
+  bool keyframe = 3;
+  // Instant de capture, en microsecondes depuis le début du flux.
+  uint64 timestamp_us = 4;
+  uint32 chunk_index = 5;
+  uint32 chunk_count = 6;
+  bytes data = 7;
+}
+
+// Le viewer accuse réception d'une image décodée : le host limite le nombre
+// d'images en vol pour que la latence ne grossisse pas quand le réseau sature.
+message FrameAck {
+  uint64 frame_id = 1;
+}
+
+// Le viewer demande une image clé (décodeur réinitialisé, perte d'état).
+message KeyframeRequest {}
+
+message SessionEnd {
+  enum Reason {
+    REASON_UNSPECIFIED = 0;
+    // L'utilisateur présent a refusé.
+    REASON_DECLINED = 1;
+    // Pas de réponse de l'utilisateur présent dans le délai imparti.
+    REASON_CONSENT_TIMEOUT = 2;
+    // Fin normale, à l'initiative de l'un des deux côtés.
+    REASON_CLOSED = 3;
+    // Permissions insuffisantes pour ce qui est demandé.
+    REASON_FORBIDDEN = 4;
+    // Erreur côté host (capture ou encodage impossible, etc.).
+    REASON_ERROR = 5;
+  }
+  Reason reason = 1;
+  string message = 2;
+}
+
+// Flux d'une session : le viewer envoie Hello ; le host demande si besoin le
+// consentement de l'utilisateur présent puis répond HelloAck (ou SessionEnd).
+// Le viewer envoie ensuite VideoConfig (écran, débit et cadence souhaités) ; le
+// host répond par le VideoConfig effectif puis diffuse des VideoChunk.
+//
+// Numérotation du oneof : 1 à 19 pour M2, 20 à 39 réservés à M3.
 message SessionMessage {
   oneof kind {
     Hello hello = 1;
@@ -75,5 +129,9 @@ message SessionMessage {
     PointerEvent pointer = 4;
     ClipboardText clipboard_text = 5;
     VideoConfig video_config = 6;
+    VideoChunk video_chunk = 7;
+    FrameAck frame_ack = 8;
+    KeyframeRequest keyframe_request = 9;
+    SessionEnd end = 10;
   }
 }
