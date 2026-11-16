@@ -21,6 +21,7 @@ pub mod limiter;
 pub mod oidc;
 pub mod rbac;
 pub mod totp;
+pub mod webauthn;
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -121,6 +122,11 @@ pub struct Config {
     pub trust_forwarded_for: bool,
     /// Connexion OpenID Connect à la console et à l'API.
     pub oidc: Option<oidc::OidcConfig>,
+    /// URL publique de la console (`https://admin.example.org`) : domaine
+    /// auquel sont liées les clés de sécurité WebAuthn. Sans elle, les clés
+    /// ne sont utilisables que si l'API écoute sur une adresse locale
+    /// (console ouverte sur `http://localhost:<port>`).
+    pub public_url: Option<String>,
 }
 
 /// Serveur démarré.
@@ -178,6 +184,19 @@ impl Server {
                 let local = listener.local_addr()?;
                 let st = state.clone();
                 let online: api::Online = Arc::new(move |key: &[u8; 32]| st.is_online(key));
+                let rp = match &config.public_url {
+                    Some(url) => Some(
+                        webauthn::RelyingParty::from_url(url).map_err(|e| anyhow::anyhow!(e))?,
+                    ),
+                    None if local.ip().is_loopback() => Some(
+                        webauthn::RelyingParty::from_url(&format!(
+                            "http://localhost:{}",
+                            local.port()
+                        ))
+                        .map_err(|e| anyhow::anyhow!(e))?,
+                    ),
+                    None => None,
+                };
                 let app = api::router(
                     db.clone(),
                     api::Services {
@@ -191,6 +210,7 @@ impl Server {
                             Some(c) => Some(Arc::new(oidc::Oidc::new(c.clone())?)),
                             None => None,
                         },
+                        webauthn: rp.map(|rp| Arc::new(webauthn::WebAuthn::new(rp))),
                     },
                 );
                 let task = tokio::spawn(async move {

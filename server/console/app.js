@@ -27,6 +27,8 @@ const ACTIONS = {
   "auth.totp_disable": "Double authentification désactivée",
   "auth.totp_reset": "Double authentification réinitialisée",
   "auth.recovery_code_used": "Code de secours utilisé",
+  "auth.webauthn_add": "Clé de sécurité ajoutée",
+  "auth.webauthn_remove": "Clé de sécurité retirée",
   "auth.oidc_link": "Compte lié au SSO",
   "user.create": "Utilisateur créé",
   "entity.create": "Entité créée",
@@ -80,10 +82,11 @@ const storage = {
 };
 
 class ApiError extends Error {
-  constructor(status, message, code) {
+  constructor(status, message, code, data) {
     super(message);
     this.status = status;
     this.code = code;
+    this.data = data;
   }
 }
 
@@ -99,7 +102,7 @@ async function api(method, path, body) {
     credentials: "omit",
     cache: "no-store",
   });
-  if (resp.status === 401 && path !== "/auth/login") {
+  if (resp.status === 401 && !path.startsWith("/auth/")) {
     storage.set(null);
     state.me = null;
     location.hash = "#/login";
@@ -107,7 +110,7 @@ async function api(method, path, body) {
   }
   const text = await resp.text();
   const data = text ? JSON.parse(text) : null;
-  if (!resp.ok) throw new ApiError(resp.status, capitalize(data?.message || `erreur ${resp.status}`), data?.error);
+  if (!resp.ok) throw new ApiError(resp.status, capitalize(data?.message || `erreur ${resp.status}`), data?.error, data);
   return data;
 }
 
@@ -214,6 +217,70 @@ function onSubmit(handler) {
   };
 }
 
+// ------------------------------------------------------- clés de sécurité
+
+const b64uToBuf = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
+const bufToB64u = (b) => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+const WEBAUTHN_ERRORS = {
+  NotAllowedError: "Clé non reconnue, opération annulée ou délai dépassé.",
+  InvalidStateError: "Cette clé est déjà enregistrée sur votre compte.",
+  SecurityError: "Le navigateur refuse les clés de sécurité sur cette adresse : ouvrez la console par son nom de domaine.",
+  NotSupportedError: "Cette clé ne prend en charge aucun des algorithmes acceptés.",
+};
+
+function webauthnError(e) {
+  return new Error(WEBAUTHN_ERRORS[e?.name] || `Clé de sécurité : ${e?.message || e}`);
+}
+
+/// `navigator.credentials.create()` à partir des options du serveur.
+async function createKey(pk) {
+  const publicKey = {
+    ...pk,
+    challenge: b64uToBuf(pk.challenge),
+    user: { ...pk.user, id: b64uToBuf(pk.user.id) },
+    excludeCredentials: pk.excludeCredentials.map((c) => ({ ...c, id: b64uToBuf(c.id) })),
+  };
+  let cred;
+  try { cred = await navigator.credentials.create({ publicKey }); } catch (e) { throw webauthnError(e); }
+  return {
+    id: cred.id,
+    client_data_json: bufToB64u(cred.response.clientDataJSON),
+    attestation_object: bufToB64u(cred.response.attestationObject),
+  };
+}
+
+/// `navigator.credentials.get()` à partir des options du serveur.
+async function useKey(pk) {
+  const publicKey = {
+    ...pk,
+    challenge: b64uToBuf(pk.challenge),
+    allowCredentials: pk.allowCredentials.map((c) => ({ ...c, id: b64uToBuf(c.id) })),
+  };
+  let cred;
+  try { cred = await navigator.credentials.get({ publicKey }); } catch (e) { throw webauthnError(e); }
+  return {
+    id: cred.id,
+    client_data_json: bufToB64u(cred.response.clientDataJSON),
+    authenticator_data: bufToB64u(cred.response.authenticatorData),
+    signature: bufToB64u(cred.response.signature),
+    user_handle: cred.response.userHandle ? bufToB64u(cred.response.userHandle) : null,
+  };
+}
+
+function authMethods() {
+  return fetch("/api/v1/auth/methods", { credentials: "omit", cache: "no-store" })
+    .then((r) => (r.ok ? r.json() : {}))
+    .catch(() => ({}));
+}
+
+function recoveryCodesCard(codes, done) {
+  return h("div", { class: "card" },
+    h("p", {}, "Codes de secours : chacun ne sert qu'une fois, si vous perdez votre téléphone ou vos clés. Ils ne seront plus affichés : conservez-les en lieu sûr."),
+    h("pre", { class: "codes" }, codes.join("\n")),
+    h("button", { type: "button", class: "primary", onclick: done }, "J'ai noté mes codes"));
+}
+
 // ------------------------------------------------------------------ état
 
 const state = { me: null };
@@ -230,46 +297,77 @@ function route() {
 
 // ------------------------------------------------------------------ vues
 
+async function loggedIn(r) {
+  storage.set(r.token);
+  await loadMe();
+  location.hash = "#/";
+}
+
 function loginView() {
-  const codeField = h("label", { hidden: true }, "Code de l'application d'authentification (ou code de secours)",
+  const codeLabel = h("span", {}, "Code de l'application d'authentification (ou code de secours)");
+  const codeField = h("label", { hidden: true }, codeLabel,
     h("input", { name: "totp_code", inputmode: "numeric", autocomplete: "one-time-code", maxlength: 12 }));
+  const keySlot = h("div", { class: "stack", hidden: true });
+
+  /// Second facteur par clé : signature du défi émis après le mot de passe.
+  async function withKey(challenge) {
+    try {
+      const credential = await useKey(challenge.public_key);
+      await loggedIn(await api("POST", "/auth/webauthn/login", { challenge_id: challenge.challenge_id, credential }));
+    } catch (e) {
+      if (e.code === "totp_invalid") flash("Clé de sécurité refusée.", "error");
+      else flash(e.message, "error");
+    }
+  }
+
   const form = h("form", { class: "stack card", onsubmit: onSubmit(async (d) => {
     const body = { email: d.email, password: d.password };
-    if (!codeField.hidden) body.totp_code = d.totp_code;
+    if (!codeField.hidden && d.totp_code) body.totp_code = d.totp_code;
     let r;
     try {
       r = await api("POST", "/auth/login", body);
     } catch (e) {
       if (e.code === "totp_required") {
+        const { totp, webauthn } = e.data || {};
         codeField.hidden = false;
-        codeField.querySelector("input").focus();
-        flash("Saisissez le code de votre application d'authentification.", "info");
+        codeField.querySelector("input").required = !webauthn;
+        codeLabel.textContent = totp
+          ? "Code de l'application d'authentification (ou code de secours)"
+          : "Code de secours";
+        if (webauthn) {
+          keySlot.hidden = false;
+          keySlot.replaceChildren(
+            h("button", { type: "button", class: "primary", onclick: () => withKey(webauthn) }, "Utiliser ma clé de sécurité"),
+            h("p", { class: "muted small or" }, totp ? "ou saisissez un code ci-dessous" : "ou, si vous n'avez pas votre clé, un code de secours"));
+          flash("Confirmez avec votre clé de sécurité.", "info");
+          withKey(webauthn);
+        } else {
+          codeField.querySelector("input").focus();
+          flash("Saisissez le code de votre application d'authentification.", "info");
+        }
         return;
       }
       if (e.code === "totp_invalid") throw new Error("Code incorrect.");
       if (e.status === 401) throw new Error("E-mail ou mot de passe incorrect.");
       throw e;
     }
-    storage.set(r.token);
-    await loadMe();
-    location.hash = "#/";
+    await loggedIn(r);
   }) },
     h("label", {}, "E-mail", h("input", { name: "email", type: "email", required: true, autocomplete: "username", autofocus: true })),
     h("label", {}, "Mot de passe", h("input", { name: "password", type: "password", required: true, autocomplete: "current-password" })),
+    keySlot,
     codeField,
     h("button", { class: "primary", type: "submit" }, "Se connecter"));
   const sso = h("div", { class: "sso" });
   // Bouton SSO si le serveur propose OIDC.
-  fetch("/api/v1/auth/methods", { credentials: "omit", cache: "no-store" })
-    .then((r) => (r.ok ? r.json() : null))
+  authMethods()
     .then((m) => {
       if (!m?.oidc) return;
       sso.replaceChildren(
         h("button", { type: "button", class: "primary sso-button", onclick: () => { location.href = "/api/v1/auth/oidc/start"; } },
           `Se connecter avec ${m.oidc.name}`),
         h("p", { class: "muted small or" }, "ou avec un mot de passe"));
-    })
-    .catch(() => {});
+    });
   return h("main", { class: "login" },
     h("h1", {}, "Creamote"),
     h("p", { class: "muted" }, "Console d'administration"),
@@ -313,7 +411,7 @@ function shell(content) {
         h("a", { href: "#/book" }, "Carnet d'adresses"),
         me.user.is_superadmin ? h("a", { href: "#/users" }, "Utilisateurs") : null),
       h("a", { class: "who", href: "#/account", title: "Mon compte" }, me.user.display_name, " · ", me.user.email,
-        me.totp_enabled ? null : h("span", { class: "pill warn", title: "Double authentification inactive" }, "2FA")),
+        me.totp_enabled || me.webauthn_keys ? null : h("span", { class: "pill warn", title: "Double authentification inactive" }, "2FA")),
       h("button", { type: "button", class: "link", onclick: async () => {
         try { await post("/auth/logout"); } catch { /* jeton déjà expiré */ }
         storage.set(null);
@@ -361,11 +459,14 @@ async function usersView() {
       u.email, u.display_name,
       u.is_superadmin ? h("span", { class: "pill" }, "super-admin") : "",
       u.disabled ? "désactivé" : "actif",
-      h("span", {}, u.totp_enabled ? "active" : h("span", { class: "muted" }, "inactive"), u.sso_linked ? h("span", { class: "pill" }, "SSO") : null),
-      u.totp_enabled && u.id !== state.me.user.id
+      h("span", {}, u.totp_enabled || u.webauthn_keys ? "active" : h("span", { class: "muted" }, "inactive"),
+        u.totp_enabled ? h("span", { class: "pill" }, "TOTP") : null,
+        u.webauthn_keys ? h("span", { class: "pill" }, u.webauthn_keys > 1 ? `${u.webauthn_keys} clés` : "1 clé") : null,
+        u.sso_linked ? h("span", { class: "pill" }, "SSO") : null),
+      (u.totp_enabled || u.webauthn_keys) && u.id !== state.me.user.id
         ? h("td", { class: "actions" }, dangerButton("Réinitialiser la 2FA", async () => {
           await post(`/users/${u.id}/totp/reset`);
-          flash(`Double authentification de ${u.email} désactivée et sessions révoquées.`);
+          flash(`Double authentification de ${u.email} désactivée (application et clés) et sessions révoquées.`);
         }))
         : "",
     ]), "Aucun utilisateur."),
@@ -388,10 +489,11 @@ async function usersView() {
 }
 
 async function accountView() {
-  const me = await loadMe();
+  const [me, methods] = await Promise.all([loadMe(), authMethods()]);
   const content = [h("h1", {}, "Mon compte"),
     h("p", {}, me.user.display_name, " · ", me.user.email),
-    h("h2", {}, "Double authentification")];
+    await securityKeysSection(me, methods),
+    h("h2", {}, "Application d'authentification")];
   if (me.totp_enabled) {
     content.push(
       h("p", {}, "Active. Codes de secours restants : ", h("strong", {}, me.recovery_codes_left), "."),
@@ -424,11 +526,9 @@ async function accountView() {
         const r = await post("/me/totp/enable", { code: x.code });
         if (qr) URL.revokeObjectURL(qr);
         state.me = null;
-        step.replaceChildren(h("div", { class: "card" },
+        step.replaceChildren(
           h("div", { class: "banner info", role: "status" }, "Double authentification active."),
-          h("p", {}, "Codes de secours : chacun ne sert qu'une fois, si vous perdez votre téléphone. Ils ne seront plus affichés : conservez-les en lieu sûr."),
-          h("pre", { class: "codes" }, r.recovery_codes.join("\n")),
-          h("button", { type: "button", class: "primary", onclick: () => render() }, "J'ai noté mes codes")));
+          recoveryCodesCard(r.recovery_codes, () => render()));
       }) },
         h("label", {}, "Code", h("input", { name: "code", required: true, inputmode: "numeric", autocomplete: "one-time-code", maxlength: 6, autofocus: true })),
         h("button", { class: "primary", type: "submit" }, "Activer"))));
@@ -436,6 +536,67 @@ async function accountView() {
     h("label", {}, "Confirmez votre mot de passe", h("input", { name: "password", type: "password", required: true, autocomplete: "current-password" })),
     h("button", { class: "primary", type: "submit" }, "Configurer")));
   return content;
+}
+
+async function securityKeysSection(me, methods) {
+  const section = h("section", {}, h("h2", {}, "Clés de sécurité"));
+  const rp = methods.webauthn?.rp_id;
+  if (!rp) {
+    section.append(h("p", { class: "muted" },
+      "Indisponibles sur ce serveur : l'administrateur doit indiquer l'URL publique de la console (--public-url)."));
+    return section;
+  }
+  section.append(h("p", { class: "muted" },
+    "Clé USB ou NFC (YubiKey, SoloKey…), Windows Hello, Touch ID ou téléphone : un second facteur qui résiste à l'hameçonnage."));
+  const keys = await get("/me/webauthn");
+  section.append(table(["Nom", "Ajoutée le", "Dernière utilisation", ""], keys.map((k) => {
+    const cell = h("td", { class: "actions" });
+    cell.append(h("button", { type: "button", class: "danger", onclick: () => {
+      cell.replaceChildren(h("form", { class: "inline", onsubmit: onSubmit(async (d) => {
+        await post(`/me/webauthn/${encodeURIComponent(k.id)}/delete`, { password: d.password });
+        flash(`Clé « ${k.name} » retirée.`);
+        await render();
+      }) },
+        h("input", { name: "password", type: "password", required: true, placeholder: "Mot de passe", "aria-label": "Mot de passe", autocomplete: "current-password" }),
+        h("button", { class: "danger", type: "submit" }, "Confirmer")));
+      cell.querySelector("input").focus();
+    } }, "Retirer"));
+    return [k.name, fmtDate(k.created_at), k.last_used_at ? fmtDate(k.last_used_at) : h("span", { class: "muted" }, "jamais"), cell];
+  }), "Aucune clé enregistrée."));
+  if (keys.length && !me.totp_enabled) {
+    section.append(h("p", {}, "Codes de secours restants : ", h("strong", {}, me.recovery_codes_left), "."));
+  }
+  if (rp !== location.hostname) {
+    section.append(h("div", { class: "banner error" },
+      `Les clés sont liées au domaine ${rp} : ouvrez la console par cette adresse pour en ajouter ou en utiliser.`));
+    return section;
+  }
+  if (!window.PublicKeyCredential) {
+    section.append(h("p", { class: "muted" }, "Ce navigateur ne prend pas en charge les clés de sécurité."));
+    return section;
+  }
+  const slot = h("div", {});
+  slot.append(h("form", { class: "inline card", onsubmit: onSubmit(async (d) => {
+    const opts = await post("/me/webauthn/register", { password: d.password });
+    flash("Touchez ou déverrouillez votre clé de sécurité.", "info");
+    const credential = await createKey(opts.public_key);
+    const r = await post("/me/webauthn", { challenge_id: opts.challenge_id, name: d.name, credential });
+    state.me = null;
+    if (r.recovery_codes) {
+      slot.replaceChildren(
+        h("div", { class: "banner info", role: "status" }, `Clé « ${d.name} » ajoutée : la double authentification est active.`),
+        recoveryCodesCard(r.recovery_codes, () => render()));
+      flash("Clé ajoutée.");
+    } else {
+      flash(`Clé « ${d.name} » ajoutée.`);
+      await render();
+    }
+  }) },
+    h("label", {}, "Nom de la clé", h("input", { name: "name", required: true, maxlength: 200, placeholder: "YubiKey bleue" })),
+    h("label", {}, "Confirmez votre mot de passe", h("input", { name: "password", type: "password", required: true, autocomplete: "current-password" })),
+    h("button", { class: "primary", type: "submit" }, "Ajouter une clé")));
+  section.append(slot);
+  return section;
 }
 
 async function bookView() {

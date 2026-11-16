@@ -51,8 +51,8 @@ struct Args {
     /// client peut contourner la limitation des tentatives de connexion.
     #[arg(long, env = "CREAMOTE_TRUST_FORWARDED_FOR")]
     trust_forwarded_for: bool,
-    /// URL publique de la console (`https://admin.example.org`), exigée par
-    /// la connexion OIDC pour l'URL de retour.
+    /// URL publique de la console (`https://admin.example.org`) : URL de
+    /// retour de la connexion OIDC et domaine des clés de sécurité WebAuthn.
     #[arg(long, env = "CREAMOTE_PUBLIC_URL")]
     public_url: Option<String>,
     /// Émetteur OpenID Connect (active la connexion SSO).
@@ -171,6 +171,7 @@ async fn main() -> anyhow::Result<()> {
                 display_name: args.oidc_name,
                 allow_unverified_email: args.oidc_allow_unverified_email,
             }),
+        public_url: args_public_url.clone(),
     })
     .await?;
 
@@ -195,6 +196,14 @@ async fn main() -> anyhow::Result<()> {
             println!("Console    : http://{a}/");
             if let Some(url) = &args_public_url {
                 println!("URL publique : {url}");
+            }
+            match (&args_public_url, a.ip().is_loopback()) {
+                (Some(url), _) => println!("Clés WebAuthn : console ouverte sur {url}"),
+                (None, true) => println!(
+                    "Clés WebAuthn : console ouverte sur http://localhost:{}/ (sinon --public-url)",
+                    a.port()
+                ),
+                (None, false) => println!("Clés WebAuthn : désactivées (--public-url requis)"),
             }
         }
         None => println!("API        : désactivée (mode public)"),

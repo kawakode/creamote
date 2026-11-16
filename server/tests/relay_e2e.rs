@@ -24,6 +24,7 @@ async fn start(policy: Policy) -> (Server, SocketAddr, ServerPin) {
         api_listen: None,
         trust_forwarded_for: false,
         oidc: None,
+        public_url: None,
     })
     .await
     .unwrap();
