@@ -38,6 +38,26 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked
       - run: cargo test --workspace --locked
 
+  postgres:
+    name: tests PostgreSQL
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: creamote
+          POSTGRES_DB: creamote_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      CREAMOTE_TEST_DATABASE_URL: postgres://postgres:creamote@localhost:5432/creamote_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p creamote-server --locked --test fleet_api
+
   docker:
     name: image du serveur
     runs-on: ubuntu-latest
