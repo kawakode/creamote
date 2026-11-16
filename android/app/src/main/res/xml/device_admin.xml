@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Aucune politique utilisée : l'administration n'est demandée que parce
+     que Samsung Knox l'exige pour activer une licence. -->
+<device-admin>
+    <uses-policies />
+</device-admin>

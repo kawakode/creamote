@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/black">
+
+    <!-- Taille ajustée au rapport largeur/hauteur de l'écran distant. -->
+    <org.creamote.android.RemoteScreenView
+        android:id="@+id/screen"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_gravity="center" />
+
+    <TextView
+        android:id="@+id/status"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:gravity="center"
+        android:padding="24dp"
+        android:textColor="@android:color/white" />
+
+    <HorizontalScrollView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:background="#99000000">
+
+        <LinearLayout
+            android:id="@+id/toolbar"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <Button android:id="@+id/keyboard" style="@style/ToolButton" android:text="@string/keyboard" />
+            <Button android:id="@+id/esc" style="@style/ToolButton" android:text="@string/key_esc" />
+            <Button android:id="@+id/tab" style="@style/ToolButton" android:text="@string/key_tab" />
+            <ToggleButton android:id="@+id/ctrl" style="@style/ToolButton" android:textOff="@string/key_ctrl" android:textOn="@string/key_ctrl" />
+            <ToggleButton android:id="@+id/alt" style="@style/ToolButton" android:textOff="@string/key_alt" android:textOn="@string/key_alt" />
+            <ToggleButton android:id="@+id/win" style="@style/ToolButton" android:textOff="@string/key_win" android:textOn="@string/key_win" />
+            <Button android:id="@+id/cad" style="@style/ToolButton" android:text="@string/key_ctrl_alt_del" />
+            <Button android:id="@+id/nextDisplay" style="@style/ToolButton" android:text="@string/next_display" />
+            <Button android:id="@+id/disconnect" style="@style/ToolButton" android:text="@string/disconnect" />
+        </LinearLayout>
+    </HorizontalScrollView>
+</FrameLayout>

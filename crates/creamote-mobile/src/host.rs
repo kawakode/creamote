@@ -189,6 +189,12 @@ impl HostService {
         });
     }
 
+    /// La capture s'est arrêtée côté app (partage révoqué par l'utilisateur,
+    /// encodeur en erreur) : la diffusion en cours se termine.
+    pub fn end_stream(&self) {
+        self.frames.close();
+    }
+
     /// Se déconnecte du serveur et termine la session en cours.
     pub fn stop(&self) {
         let _ = self.stop.send(true);
