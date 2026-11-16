@@ -1,0 +1,9 @@
+#!/bin/sh
+# Mise à jour : arrête l'agent de l'utilisateur connecté avant de remplacer
+# le binaire.
+PLIST=/Library/LaunchAgents/org.creamote.host.plist
+uid=$(stat -f %u /dev/console 2>/dev/null)
+if [ -f "$PLIST" ] && [ -n "$uid" ] && [ "$uid" != 0 ]; then
+    launchctl bootout "gui/$uid" "$PLIST" 2>/dev/null || true
+fi
+exit 0

@@ -1,0 +1,5 @@
+#!/bin/sh
+# Installe l'agent launchd (toutes les sessions) et le démarre pour
+# l'utilisateur connecté.
+"/Library/Application Support/Creamote/creamote-host" service install
+exit 0

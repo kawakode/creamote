@@ -1,0 +1,16 @@
+# Service utilisateur systemd : le host tourne dans chaque session graphique
+# (accès à l'écran, au portail Wayland et au bus D-Bus de session).
+# Activé pour tous les utilisateurs par le paquet : systemctl --global enable.
+[Unit]
+Description=Creamote host (accès à distance)
+Documentation=https://github.com/kawakode/creamote
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/bin/creamote-host --service
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

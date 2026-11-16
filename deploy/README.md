@@ -46,7 +46,7 @@ Serveur public (`--public`, sans gestion de parc, avec limites par IP) : voir [o
 
 ## Host installé comme service
 
-Sur les machines à contrôler sans surveillance, installez le host comme service (droits administrateur) :
+Les paquets de chaque [release](https://github.com/kawakode/creamote/releases) installent le host comme service : MSI (Windows), `.pkg` (macOS), `.deb`/`.rpm` (Linux) ; voir [docs/release.md](../docs/release.md). Sans paquet, depuis le binaire (droits administrateur) :
 
 ```sh
 creamote-host service install     # Windows : service CreamoteHost ; macOS : agent launchd ; Linux : service utilisateur systemd
