@@ -6,8 +6,8 @@ Vue d'ensemble ; les décisions détaillées sont dans `docs/adr/`.
 
 1. **Enregistrement** : host et client ouvrent une connexion persistante vers le serveur de rendezvous choisi et s'annoncent avec leur identité (`RegisterPeer`).
 2. **Signalisation** : le client demande à joindre un ID (`ConnectRequest`) ; le serveur transmet l'offre au host (`ConnectOffer`) et échange les adresses observées.
-3. **P2P** : les deux pairs tentent une connexion QUIC directe (LAN puis hole punching UDP).
-4. **Repli relay** : en cas d'échec, le serveur délivre un `RelayGrant` ; le relay recopie des octets opaques. Repli TCP/WebSocket 443 si l'UDP est bloqué.
+3. **Session acceptée** : le serveur envoie à chacun un `RelayGrant` portant les adresses candidates de l'autre pair et un jeton relay.
+4. **P2P puis repli relay** : les deux pairs tentent une connexion QUIC directe (adresse publique par hole punching UDP, adresses LAN) ; le viewer rejoint le relay en parallèle et l'utilise si le direct n'aboutit pas en 3 s. Le relay recopie des octets opaques. Repli TCP/WebSocket 443 si l'UDP est bloqué (à venir).
 5. **Handshake Noise XX** entre les deux pairs, à l'intérieur du transport, authentifié par les identités d'appareil (`creamote-crypto`). Les `SessionMessage` circulent ensuite chiffrés.
 
 ## Authentification du serveur et des pairs
@@ -17,9 +17,21 @@ Vue d'ensemble ; les décisions détaillées sont dans `docs/adr/`.
 - **Session** : le host et le viewer vérifient l'identité de l'autre à l'issue du handshake Noise, sans faire confiance au serveur. Le viewer vérifie que la clé authentifiée correspond à l'ID demandé ; le host, qu'elle correspond au demandeur annoncé.
 - **Relay** : deux jetons aléatoires de 256 bits par session, un par côté, valables 30 s. Le relay apparie les deux flux et recopie des octets opaques.
 
+## Connexion directe (M3)
+
+Détails et alternatives dans [ADR 0002](adr/0002-p2p.md).
+
+- **Un seul endpoint QUIC par pair** pour le rendezvous, le direct et le relay : l'adresse publique que le serveur observe à l'enregistrement est la correspondance NAT qui servira au hole punching.
+- **Candidats** : le pair annonce ses adresses LAN (`RegisterPeer.local_addrs`, énumérées par l'OS : `getifaddrs`, `GetAdaptersAddresses`) ; le serveur les transmet, précédées de l'adresse observée, dans le `RelayGrant` de l'autre pair (au plus 8).
+- **Rôles fixes** : le viewer est client QUIC, le host serveur. Le host émet lui aussi des tentatives vers les candidats du viewer pour ouvrir sa propre correspondance NAT. Hors d'une session qu'il vient d'accepter, le host refuse toute connexion entrante.
+- **Choix du chemin par le viewer** : il envoie `DirectJoin` sur la connexion directe s'il l'obtient dans les 3 s, sinon il parle sur le relay. Le host suit. TLS n'est pas vérifié sur le direct (certificat éphémère) : Noise authentifie les pairs comme à travers le relay.
+- **Vie privée** : `relay_only` à l'enregistrement (`--relay-only`) : le serveur ne communique jamais les adresses de ce pair, et la session passe par le relay.
+- **Quotas** : les limites du serveur public ne portent que sur le relay. Si le relay est plein ou le quota de l'IP atteint, la session est quand même proposée en direct seul (`relay_unavailable`), et l'erreur n'est remontée que si le direct échoue.
+- **Limites connues** : NAT symétriques (port différent par destination) → relay. Un NAT qui crée un état conntrack pour un paquet entrant non sollicité au lieu de le jeter peut décaler le port ; les box usuelles jettent ce trafic. `tools/nat-lab.sh` rejoue ces cas en CI.
+
 ## Serveur officiel et serveurs custom
 
-Un seul binaire `creamote-server`. En mode `public` il applique une `ServerPolicy` : **une session relay à la fois par adresse IP du demandeur**, **10 minutes maximum par session** et 200 sessions au total, valeurs réglables. Le serveur officiel n'offre pas la gestion de parc (comptes, entités, RBAC) : elle est réservée aux serveurs auto-hébergés. Le plafond de débit et la limitation de l'enregistrement d'IDs arrivent en M6. Client et host conservent une liste de serveurs, chacun épinglé par son empreinte.
+Un seul binaire `creamote-server`. En mode `public` il applique une `ServerPolicy` (au relay seulement, une connexion directe ne coûtant rien au serveur) : **une session relay à la fois par adresse IP du demandeur**, **10 minutes maximum par session** et 200 sessions au total, valeurs réglables. Le serveur officiel n'offre pas la gestion de parc (comptes, entités, RBAC) : elle est réservée aux serveurs auto-hébergés. Le plafond de débit et la limitation de l'enregistrement d'IDs arrivent en M6. Client et host conservent une liste de serveurs, chacun épinglé par son empreinte.
 
 ## Gestion de parc (M4)
 

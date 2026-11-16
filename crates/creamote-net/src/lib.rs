@@ -5,6 +5,8 @@
 //! - [`frame`] : lecture/écriture de trames sur un flux.
 //! - [`rendezvous`] : client du serveur de rendezvous (enregistrement prouvé,
 //!   demande de session, offres entrantes).
+//! - [`p2p`] : connexion directe entre pairs (LAN, hole punching UDP) avec
+//!   repli sur le relay ; [`stream::PeerStream`] est le flux obtenu.
 //! - [`relay`] : connexion au relay avec le jeton délivré par le rendezvous.
 //! - [`ticket`] : tickets de session signés par le serveur de gestion, et
 //!   décision d'accepter une offre côté host.
@@ -13,9 +15,11 @@
 
 pub mod frame;
 pub mod ident;
+pub mod p2p;
 pub mod relay;
 pub mod rendezvous;
 pub mod secure;
+pub mod stream;
 pub mod ticket;
 pub mod tls;
 

@@ -18,7 +18,7 @@ Milestone **M1 : rendezvous et relay**. Voir [docs/architecture.md](docs/archite
 - `proto/` : schémas protobuf (rendezvous, relay, session).
 - `crates/creamote-proto` : types générés et framing des messages.
 - `crates/creamote-crypto` : identité d'appareil (Ed25519 + clé Noise X25519 liée), ID à 9 chiffres, empreinte, handshake Noise XX authentifié et canal chiffré.
-- `crates/creamote-net` : QUIC avec certificat de serveur épinglé, client de rendezvous, connexion au relay, canal chiffré de bout en bout.
+- `crates/creamote-net` : QUIC avec certificat de serveur épinglé, client de rendezvous, connexion directe entre pairs (LAN, hole punching UDP) avec repli sur le relay, canal chiffré de bout en bout.
 - `server/` : rendezvous + relay, mode public avec limites (voir [deploy/](deploy/README.md)), et gestion de parc : comptes, entités, parcs, groupes de sécurité, RBAC et audit, via une [API HTTP](docs/api.md) et une console web d'administration intégrée, sur SQLite ou PostgreSQL ; enrôlement des machines et tickets de session signés.
 - `host/` : s'enregistre et accepte les sessions (écho chiffré en attendant la capture d'écran de M2).
 - `cli/` : `creamote-cli`, outil de test des connexions.
@@ -33,7 +33,9 @@ cargo run -p creamote-host -- --server 127.0.0.1:21400 --server-pin <empreinte>
 cargo run -p creamote-cli -- connect "<ID>" --server 127.0.0.1:21400 --server-pin <empreinte>
 ```
 
-Chaque ligne tapée dans le client traverse le relay chiffrée de bout en bout et revient en écho du host. Les deux côtés affichent le même code de vérification.
+Chaque ligne tapée dans le client est chiffrée de bout en bout et revient en écho du host. La connexion est directe quand c'est possible, via le relay sinon (`--relay-only` côté host ou client pour ne jamais révéler son adresse à l'autre pair). Les deux côtés affichent le même code de vérification.
+
+`sudo tools/nat-lab.sh cone|symmetric|same-lan` (Linux) rejoue une session entre deux machines derrière des NAT simulés.
 
 ## Développement
 

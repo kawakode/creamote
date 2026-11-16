@@ -19,8 +19,11 @@ use rustls::{DigitallySignedStruct, SignatureScheme};
 
 use crate::{NetError, Result, SERVER_NAME};
 
-/// ALPN du protocole Creamote.
+/// ALPN du protocole Creamote (pair ↔ serveur).
 pub const ALPN: &[u8] = b"creamote/1";
+
+/// ALPN des connexions directes entre pairs.
+pub const P2P_ALPN: &[u8] = b"creamote-p2p/1";
 
 const CERT_FILE: &str = "server-cert.der";
 const KEY_FILE: &str = "server-key.der";
@@ -154,6 +157,35 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 /// Configuration client QUIC qui n'accepte que le serveur d'empreinte `pin`.
 pub fn quic_client_config(pin: ServerPin) -> Result<quinn::ClientConfig> {
+    client_config(Some(pin), ALPN)
+}
+
+/// Configuration serveur QUIC d'un pair qui accepte les connexions directes.
+///
+/// Le certificat est éphémère et n'est pas vérifié par l'autre pair : TLS ne
+/// sert ici que de transport. L'authentification mutuelle des pairs est faite
+/// par le handshake Noise qui suit, avec leurs identités d'appareil.
+pub fn p2p_server_config() -> Result<quinn::ServerConfig> {
+    let cert = ServerCert::generate()?;
+    let mut tls = rustls::ServerConfig::builder_with_provider(provider())
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .with_no_client_auth()
+        .with_single_cert(vec![cert.cert], PrivateKeyDer::Pkcs8(cert.key))?;
+    tls.alpn_protocols = vec![P2P_ALPN.to_vec()];
+    let crypto = QuicServerConfig::try_from(tls)
+        .map_err(|_| NetError::Protocol("suite TLS incompatible avec QUIC"))?;
+    let mut cfg = quinn::ServerConfig::with_crypto(Arc::new(crypto));
+    cfg.transport_config(transport());
+    Ok(cfg)
+}
+
+/// Configuration client QUIC d'une connexion directe vers un pair (voir
+/// [`p2p_server_config`] : l'authentification est faite par Noise).
+pub fn p2p_client_config() -> Result<quinn::ClientConfig> {
+    client_config(None, P2P_ALPN)
+}
+
+fn client_config(pin: Option<ServerPin>, alpn: &[u8]) -> Result<quinn::ClientConfig> {
     let provider = provider();
     let verifier = Arc::new(PinnedVerifier {
         pin,
@@ -164,7 +196,7 @@ pub fn quic_client_config(pin: ServerPin) -> Result<quinn::ClientConfig> {
         .dangerous()
         .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();
-    tls.alpn_protocols = vec![ALPN.to_vec()];
+    tls.alpn_protocols = vec![alpn.to_vec()];
     let crypto = QuicClientConfig::try_from(tls)
         .map_err(|_| NetError::Protocol("suite TLS incompatible avec QUIC"))?;
     let mut cfg = quinn::ClientConfig::new(Arc::new(crypto));
@@ -172,10 +204,11 @@ pub fn quic_client_config(pin: ServerPin) -> Result<quinn::ClientConfig> {
     Ok(cfg)
 }
 
-/// Vérifie l'empreinte du certificat, puis la signature TLS 1.3 normalement.
+/// Vérifie l'empreinte du certificat (si `pin`), puis la signature TLS 1.3
+/// normalement.
 #[derive(Debug)]
 struct PinnedVerifier {
-    pin: ServerPin,
+    pin: Option<ServerPin>,
     provider: Arc<CryptoProvider>,
 }
 
@@ -188,7 +221,10 @@ impl ServerCertVerifier for PinnedVerifier {
         _ocsp_response: &[u8],
         _now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        if ServerPin::of(end_entity.as_ref()) == self.pin {
+        if self
+            .pin
+            .is_none_or(|pin| ServerPin::of(end_entity.as_ref()) == pin)
+        {
             Ok(ServerCertVerified::assertion())
         } else {
             Err(rustls::Error::InvalidCertificate(
@@ -235,15 +271,42 @@ pub async fn connect(
     addr: std::net::SocketAddr,
     pin: ServerPin,
 ) -> Result<(quinn::Endpoint, quinn::Connection)> {
-    let bind: std::net::SocketAddr = if addr.is_ipv6() {
+    let endpoint = endpoint_for(addr, None)?;
+    let conn = connect_on(&endpoint, addr, pin).await?;
+    Ok((endpoint, conn))
+}
+
+/// Endpoint QUIC sur un port UDP éphémère de la famille d'adresses de
+/// `peer`. Avec `server`, il accepte aussi les connexions entrantes.
+pub fn endpoint_for(
+    peer: std::net::SocketAddr,
+    server: Option<quinn::ServerConfig>,
+) -> Result<quinn::Endpoint> {
+    let bind: std::net::SocketAddr = if peer.is_ipv6() {
         (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
     } else {
         (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
     };
-    let mut endpoint = quinn::Endpoint::client(bind)?;
-    endpoint.set_default_client_config(quic_client_config(pin)?);
-    let conn = endpoint.connect(addr, SERVER_NAME)?.await?;
-    Ok((endpoint, conn))
+    let socket = std::net::UdpSocket::bind(bind)?;
+    let runtime =
+        quinn::default_runtime().ok_or(NetError::Protocol("runtime asynchrone introuvable"))?;
+    Ok(quinn::Endpoint::new(
+        quinn::EndpointConfig::default(),
+        server,
+        socket,
+        runtime,
+    )?)
+}
+
+/// Connexion vers le serveur d'empreinte `pin` depuis un endpoint existant.
+pub async fn connect_on(
+    endpoint: &quinn::Endpoint,
+    addr: std::net::SocketAddr,
+    pin: ServerPin,
+) -> Result<quinn::Connection> {
+    Ok(endpoint
+        .connect_with(quic_client_config(pin)?, addr, SERVER_NAME)?
+        .await?)
 }
 
 #[cfg(test)]

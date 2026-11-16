@@ -18,6 +18,7 @@ pub use creamote_proto::rendezvous::v1::{
 };
 use rand_core::{OsRng, RngCore};
 
+pub use crate::p2p::Connector;
 use crate::tls::ServerPin;
 use crate::{EnrollStatus, NetError, RegisterStatus, RejectReason, Result, frame, ident};
 
@@ -32,8 +33,21 @@ pub enum Event {
     Rejected(ConnectRejected),
 }
 
+/// Options d'enregistrement.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RegisterOptions {
+    /// Accepter les connexions directes entrantes (rôle host).
+    pub accept_direct: bool,
+    /// Refuser la connexion directe : les adresses de cet appareil ne sont
+    /// jamais communiquées à l'autre pair, toutes les sessions passent par
+    /// le relay.
+    pub relay_only: bool,
+}
+
 pub struct RendezvousClient {
-    _endpoint: quinn::Endpoint,
+    endpoint: quinn::Endpoint,
+    acceptor: Option<crate::p2p::DirectAcceptor>,
+    _accept_task: Option<AbortOnDrop>,
     conn: quinn::Connection,
     send: quinn::SendStream,
     recv: quinn::RecvStream,
@@ -42,22 +56,57 @@ pub struct RendezvousClient {
     registration: RegisterPeerResponse,
 }
 
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 impl RendezvousClient {
-    /// Se connecte au serveur d'empreinte `pin` et y enregistre `identity`.
+    /// Se connecte au serveur d'empreinte `pin` et y enregistre `identity`
+    /// (rôle viewer : connexions directes sortantes uniquement).
     pub async fn register(
         server_addr: SocketAddr,
         pin: ServerPin,
         identity: &DeviceIdentity,
     ) -> Result<Self> {
-        let (endpoint, conn) = crate::tls::connect(server_addr, pin).await?;
+        Self::register_with(server_addr, pin, identity, RegisterOptions::default()).await
+    }
+
+    /// Comme [`Self::register`], avec des options (host : `accept_direct`).
+    pub async fn register_with(
+        server_addr: SocketAddr,
+        pin: ServerPin,
+        identity: &DeviceIdentity,
+        options: RegisterOptions,
+    ) -> Result<Self> {
+        // Un seul endpoint pour le rendezvous, le direct et le relay : la
+        // correspondance NAT observée par le serveur est celle qui servira
+        // au hole punching.
+        let server_cfg = if options.accept_direct && !options.relay_only {
+            Some(crate::tls::p2p_server_config()?)
+        } else {
+            None
+        };
+        let endpoint = crate::tls::endpoint_for(server_addr, server_cfg)?;
+        let conn = crate::tls::connect_on(&endpoint, server_addr, pin).await?;
         let (mut send, mut recv) = conn.open_bi().await?;
 
+        let local_addrs = if options.relay_only {
+            Vec::new()
+        } else {
+            let local = endpoint.local_addr()?;
+            crate::p2p::local_addrs(local, local.port())
+        };
         let register = RegisterPeer {
             identity: Some(ident::to_proto(identity.public())),
             platform: current_platform() as i32,
             version: Some(creamote_proto::PROTOCOL_VERSION),
-            local_addrs: Vec::new(),
+            local_addrs,
             proof: ident::register_proof(&conn, identity)?,
+            relay_only: options.relay_only,
         };
         frame::write_msg(
             &mut send,
@@ -76,8 +125,17 @@ impl RendezvousClient {
         if status != RegisterStatus::Ok {
             return Err(NetError::Registration(status));
         }
+        let (acceptor, accept_task) = if options.accept_direct && !options.relay_only {
+            let acceptor = crate::p2p::DirectAcceptor::default();
+            let task = acceptor.spawn(endpoint.clone());
+            (Some(acceptor), Some(AbortOnDrop(task)))
+        } else {
+            (None, None)
+        };
         Ok(Self {
-            _endpoint: endpoint,
+            endpoint,
+            acceptor,
+            _accept_task: accept_task,
             conn,
             send,
             recv,
@@ -97,13 +155,18 @@ impl RendezvousClient {
 
     /// Adresse du relay d'un jeton (celle du serveur si non précisée).
     pub fn relay_addr(&self, grant: &RelayGrant) -> Result<SocketAddr> {
-        if grant.relay_addr.is_empty() {
-            return Ok(self.server_addr);
+        crate::p2p::relay_addr(self.server_addr, grant)
+    }
+
+    /// Établit le flux d'une session acceptée (direct ou relay), depuis
+    /// n'importe quelle tâche : [`Connector::viewer`] ou [`Connector::host`].
+    pub fn connector(&self) -> Connector {
+        Connector {
+            endpoint: self.endpoint.clone(),
+            server_addr: self.server_addr,
+            pin: self.pin,
+            acceptor: self.acceptor.clone(),
         }
-        grant
-            .relay_addr
-            .parse()
-            .map_err(|_| NetError::Protocol("adresse de relay invalide"))
     }
 
     /// Attend le prochain événement ; `Ok(None)` si le serveur a fermé.
@@ -187,6 +250,9 @@ impl RendezvousClient {
     /// Répond à une offre entrante. Si elle est acceptée, le jeton relay
     /// arrive ensuite comme [`Event::Grant`] portant le même `session_id`.
     pub async fn answer(&mut self, offer: &ConnectOffer, accepted: bool) -> Result<()> {
+        if let (true, Some(acceptor)) = (accepted, &self.acceptor) {
+            acceptor.arm();
+        }
         let answer = ConnectAnswer {
             session_id: offer.session_id.clone(),
             accepted,

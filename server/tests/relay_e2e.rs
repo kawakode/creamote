@@ -8,7 +8,7 @@ use std::time::Duration;
 use creamote_crypto::{DeviceId, DeviceIdentity, PublicIdentity};
 use creamote_net::ident;
 use creamote_net::relay::RelayStream;
-use creamote_net::rendezvous::{Event, RendezvousClient};
+use creamote_net::rendezvous::{Event, RegisterOptions, RendezvousClient};
 use creamote_net::secure::SecureChannel;
 use creamote_net::tls::ServerPin;
 use creamote_net::{NetError, RejectReason};
@@ -79,7 +79,12 @@ async fn open_session(
     target: DeviceId,
 ) -> Result<(SecureChannel<RelayStream>, RendezvousClient), NetError> {
     let viewer = DeviceIdentity::generate();
-    let mut rv = RendezvousClient::register(addr, pin, &viewer).await?;
+    // Ces tests portent sur le relay : pas de connexion directe.
+    let options = RegisterOptions {
+        accept_direct: false,
+        relay_only: true,
+    };
+    let mut rv = RendezvousClient::register_with(addr, pin, &viewer, options).await?;
     let grant = rv.request_session(target).await?;
     let stream = RelayStream::join(rv.relay_addr(&grant)?, pin, &grant).await?;
     let chan = SecureChannel::initiate(stream, &viewer).await?;

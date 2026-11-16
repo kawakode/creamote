@@ -1,8 +1,9 @@
 //! Host Creamote.
 //!
-//! S'enregistre auprès d'un serveur et accepte les sessions entrantes via le
-//! relay. Chaque session établit un canal Noise de bout en bout puis, en
-//! attendant la capture d'écran (M2), renvoie en écho les messages reçus.
+//! S'enregistre auprès d'un serveur et accepte les sessions entrantes, en
+//! connexion directe si possible, via le relay sinon. Chaque session établit
+//! un canal Noise de bout en bout puis, en attendant la capture d'écran (M2),
+//! renvoie en écho les messages reçus.
 //!
 //! - **Host enrôlé** dans un parc (`--enroll <jeton>`) : une session n'est
 //!   acceptée que sur présentation d'un ticket signé par le serveur, émis
@@ -19,9 +20,9 @@ use anyhow::Context;
 use clap::Parser;
 use creamote_crypto::{DeviceIdentity, PublicIdentity, store};
 use creamote_net::ident;
-use creamote_net::relay::RelayStream;
-use creamote_net::rendezvous::{Event, RendezvousClient};
+use creamote_net::rendezvous::{Connector, Event, RegisterOptions, RendezvousClient};
 use creamote_net::secure::SecureChannel;
+use creamote_net::stream::PeerPath;
 use creamote_net::ticket::{self, Decision, Enrollment};
 use creamote_net::tls::ServerPin;
 
@@ -47,6 +48,10 @@ struct Args {
     /// Nom affiché de la machine à l'enrôlement (par défaut, son ID).
     #[arg(long, requires = "enroll")]
     name: Option<String>,
+    /// Refuse la connexion directe : l'adresse de cette machine n'est pas
+    /// communiquée aux viewers, toutes les sessions passent par le relay.
+    #[arg(long)]
+    relay_only: bool,
 }
 
 #[tokio::main]
@@ -81,7 +86,11 @@ async fn main() -> anyhow::Result<()> {
         .await?
         .next()
         .with_context(|| format!("adresse introuvable : {server}"))?;
-    let mut rv = RendezvousClient::register(addr, pin, &identity).await?;
+    let options = RegisterOptions {
+        accept_direct: true,
+        relay_only: args.relay_only,
+    };
+    let mut rv = RendezvousClient::register_with(addr, pin, &identity, options).await?;
 
     if let Some(token) = args.enroll {
         anyhow::ensure!(
@@ -120,13 +129,12 @@ async fn main() -> anyhow::Result<()> {
         ),
         None => println!("Non enrôlé : mode développement, toute demande est acceptée."),
     }
-    serve(rv, addr, pin, Arc::new(identity), enrollment).await
+    serve(rv, addr, Arc::new(identity), enrollment).await
 }
 
 async fn serve(
     mut rv: RendezvousClient,
     addr: std::net::SocketAddr,
-    pin: ServerPin,
     identity: Arc<DeviceIdentity>,
     enrollment: Option<Enrollment>,
 ) -> anyhow::Result<()> {
@@ -174,10 +182,10 @@ async fn serve(
                 let Some(expected) = offers.remove(&grant.session_id) else {
                     continue;
                 };
-                let relay = rv.relay_addr(&grant)?;
+                let connector = rv.connector();
                 let identity = identity.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = echo_session(relay, pin, grant, expected, identity).await {
+                    if let Err(e) = echo_session(connector, grant, expected, identity).await {
                         eprintln!("Session interrompue : {e:#}");
                     }
                 });
@@ -190,13 +198,14 @@ async fn serve(
 }
 
 async fn echo_session(
-    relay: std::net::SocketAddr,
-    pin: ServerPin,
+    connector: Connector,
     grant: creamote_net::rendezvous::RelayGrant,
     expected: PublicIdentity,
     identity: Arc<DeviceIdentity>,
 ) -> anyhow::Result<()> {
-    let stream = RelayStream::join(relay, pin, &grant).await?;
+    // Connexion directe si possible, relay sinon.
+    let stream = connector.host(&grant).await?;
+    let path = stream.path();
     let mut chan = SecureChannel::respond(stream, &identity).await?;
     // Le serveur a annoncé une identité ; Noise prouve celle du pair réel.
     anyhow::ensure!(
@@ -204,8 +213,9 @@ async fn echo_session(
         "l'identité authentifiée ne correspond pas à celle annoncée par le serveur"
     );
     println!(
-        "Session chiffrée avec {} — code de vérification {}",
+        "Session chiffrée avec {} ({}) — code de vérification {}",
         expected.device_id(),
+        path_label(path),
         chan.verification_code()
     );
     while let Some(m) = chan.recv().await? {
@@ -214,4 +224,11 @@ async fn echo_session(
     }
     println!("Session avec {} terminée.", expected.device_id());
     Ok(())
+}
+
+fn path_label(path: PeerPath) -> &'static str {
+    match path {
+        PeerPath::Direct => "connexion directe",
+        PeerPath::Relay => "via le relay",
+    }
 }

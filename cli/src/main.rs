@@ -1,7 +1,8 @@
 //! `creamote-cli` : outil de test du protocole.
 //!
 //! `creamote-cli connect <ID> --server <hôte:port> --server-pin <empreinte>`
-//! ouvre une session chiffrée de bout en bout vers un host via le relay, puis
+//! ouvre une session chiffrée de bout en bout vers un host (connexion directe
+//! si possible, relay sinon), puis
 //! envoie chaque ligne saisie et affiche les réponses (écho du host en M1).
 //!
 //! Pour un host enrôlé dans un parc, ajoutez `--api-url` et `--api-token`
@@ -13,9 +14,9 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use creamote_crypto::{DeviceId, store};
-use creamote_net::relay::RelayStream;
-use creamote_net::rendezvous::RendezvousClient;
+use creamote_net::rendezvous::{RegisterOptions, RendezvousClient};
 use creamote_net::secure::SecureChannel;
+use creamote_net::stream::PeerPath;
 use creamote_net::tls::ServerPin;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -50,6 +51,10 @@ enum Command {
         /// Jeton d'API (`creamote-cli login`).
         #[arg(long, env = "CREAMOTE_API_TOKEN", hide_env_values = true)]
         api_token: Option<String>,
+        /// Refuse la connexion directe (votre adresse n'est pas communiquée
+        /// au host) : la session passe par le relay.
+        #[arg(long)]
+        relay_only: bool,
     },
     /// Ouvre une session d'API et affiche le jeton (mot de passe lu sur
     /// l'entrée standard).
@@ -132,6 +137,7 @@ async fn main() -> anyhow::Result<()> {
             server_pin,
             api_url,
             api_token,
+            relay_only,
         } => {
             let target = DeviceId::parse(&target).context("ID invalide (9 chiffres attendus)")?;
             let addr = tokio::net::lookup_host(&server)
@@ -156,10 +162,16 @@ async fn main() -> anyhow::Result<()> {
                 _ => Vec::new(),
             };
 
-            let mut rv = RendezvousClient::register(addr, server_pin, &identity).await?;
+            let options = RegisterOptions {
+                accept_direct: false,
+                relay_only,
+            };
+            let mut rv =
+                RendezvousClient::register_with(addr, server_pin, &identity, options).await?;
             let grant = rv.request_session_with_ticket(target, ticket).await?;
-            let relay = rv.relay_addr(&grant)?;
-            let stream = RelayStream::join(relay, server_pin, &grant).await?;
+            // Connexion directe si possible, relay sinon.
+            let stream = rv.connector().viewer(&grant).await?;
+            let path = stream.path();
             let mut chan = SecureChannel::initiate(stream, &identity).await?;
 
             // Seul Noise fait foi : on vérifie que la clé authentifiée
@@ -174,7 +186,11 @@ async fn main() -> anyhow::Result<()> {
                 chan.remote().fingerprint()
             );
             println!("Code de vérification : {}", chan.verification_code());
-            if grant.max_session_seconds > 0 {
+            match path {
+                PeerPath::Direct => println!("Connexion directe."),
+                PeerPath::Relay => println!("Connexion via le relay."),
+            }
+            if path == PeerPath::Relay && grant.max_session_seconds > 0 {
                 println!(
                     "Serveur public : session limitée à {} min.",
                     grant.max_session_seconds / 60
