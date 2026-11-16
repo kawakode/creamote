@@ -1,0 +1,31 @@
+[package]
+name = "creamote-transfer"
+description = "Presse-papier partagé et transfert de fichiers dans une session Creamote"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+creamote-proto.workspace = true
+blake3.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs"] }
+tracing.workspace = true
+png.workspace = true
+# Presse-papier natif : Win32 (OpenClipboard), NSPasteboard (macOS),
+# sélections X11 et protocole data-control de Wayland.
+arboard.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# GetClipboardSequenceNumber : détecte une copie sans relire le contenu.
+clipboard-win.workspace = true
+
+[dev-dependencies]
+creamote-crypto.workspace = true
+creamote-net.workspace = true
+prost.workspace = true
+
+[lints]
+workspace = true
