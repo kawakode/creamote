@@ -38,6 +38,7 @@ thiserror.workspace = true
 creamote-crypto.workspace = true
 tower.workspace = true
 http-body-util.workspace = true
+reqwest.workspace = true
 
 [lints]
 workspace = true

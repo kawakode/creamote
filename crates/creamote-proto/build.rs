@@ -9,6 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "creamote/common.proto",
         "creamote/rendezvous.proto",
         "creamote/session.proto",
+        "creamote/ticket.proto",
     ];
     for f in &files {
         println!("cargo:rerun-if-changed={}", root.join(f).display());

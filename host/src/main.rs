@@ -1,11 +1,15 @@
 //! Host Creamote.
 //!
-//! M1 : s'enregistre auprès d'un serveur et accepte les sessions entrantes
-//! via le relay. Chaque session établit un canal Noise de bout en bout puis,
-//! en attendant la capture d'écran (M2), renvoie en écho les messages reçus.
+//! S'enregistre auprès d'un serveur et accepte les sessions entrantes via le
+//! relay. Chaque session établit un canal Noise de bout en bout puis, en
+//! attendant la capture d'écran (M2), renvoie en écho les messages reçus.
 //!
-//! Le consentement de l'utilisateur et les permissions arrivent avec M2/M4 :
-//! en M1, toute demande est acceptée, mais elle ne donne accès qu'à l'écho.
+//! - **Host enrôlé** dans un parc (`--enroll <jeton>`) : une session n'est
+//!   acceptée que sur présentation d'un ticket signé par le serveur, émis
+//!   pour ce host et pour l'appareil qui se connecte, et accordant
+//!   `view_screen` + `unattended`.
+//! - **Host non enrôlé** (mode développement) : toute demande est acceptée.
+//!   Le consentement de l'utilisateur présent arrive avec M2.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -18,6 +22,7 @@ use creamote_net::ident;
 use creamote_net::relay::RelayStream;
 use creamote_net::rendezvous::{Event, RendezvousClient};
 use creamote_net::secure::SecureChannel;
+use creamote_net::ticket::{self, Decision, Enrollment};
 use creamote_net::tls::ServerPin;
 
 #[derive(Parser)]
@@ -26,12 +31,22 @@ struct Args {
     /// Fichier de l'identité de l'appareil (créé s'il n'existe pas).
     #[arg(long, default_value = "creamote-host.identity")]
     identity_file: PathBuf,
-    /// Serveur Creamote, `hôte:port`. Sans serveur, affiche seulement l'ID.
+    /// Fichier d'enrôlement (créé par `--enroll`).
+    #[arg(long, default_value = "creamote-host.enrollment")]
+    enrollment_file: PathBuf,
+    /// Serveur Creamote, `hôte:port`. Par défaut, celui de l'enrôlement ;
+    /// sans serveur ni enrôlement, affiche seulement l'ID.
     #[arg(long, requires = "server_pin")]
     server: Option<String>,
     /// Empreinte du serveur (affichée au démarrage de creamote-server).
     #[arg(long)]
     server_pin: Option<ServerPin>,
+    /// Enrôle ce host dans un parc avec un jeton créé par un administrateur.
+    #[arg(long, requires = "server")]
+    enroll: Option<String>,
+    /// Nom affiché de la machine à l'enrôlement (par défaut, son ID).
+    #[arg(long, requires = "enroll")]
+    name: Option<String>,
 }
 
 #[tokio::main]
@@ -50,22 +65,71 @@ async fn main() -> anyhow::Result<()> {
     println!("ID de l'appareil : {}", identity.device_id());
     println!("Empreinte        : {}", identity.public().fingerprint());
 
-    let (Some(server), Some(pin)) = (args.server, args.server_pin) else {
-        return Ok(());
+    let mut enrollment = Enrollment::load(&args.enrollment_file)
+        .with_context(|| format!("enrôlement {}", args.enrollment_file.display()))?;
+    let (server, pin) = match (args.server, args.server_pin, &enrollment) {
+        (Some(s), Some(p), _) => (s, p),
+        (None, _, Some(e)) => (
+            e.server.clone(),
+            e.server_pin
+                .parse()
+                .context("empreinte du fichier d'enrôlement")?,
+        ),
+        _ => return Ok(()),
     };
     let addr = tokio::net::lookup_host(&server)
         .await?
         .next()
         .with_context(|| format!("adresse introuvable : {server}"))?;
-    serve(addr, pin, Arc::new(identity)).await
+    let mut rv = RendezvousClient::register(addr, pin, &identity).await?;
+
+    if let Some(token) = args.enroll {
+        anyhow::ensure!(
+            enrollment.is_none(),
+            "ce host est déjà enrôlé ({}) : supprimez ce fichier pour le réenrôler",
+            args.enrollment_file.display()
+        );
+        let name = args
+            .name
+            .unwrap_or_else(|| identity.device_id().to_string());
+        let r = rv.enroll(&token, &name).await.context("enrôlement")?;
+        let e = Enrollment {
+            ticket_key: r
+                .ticket_public_key
+                .as_slice()
+                .try_into()
+                .context("clé de tickets invalide")?,
+            server: server.clone(),
+            server_pin: pin.to_string(),
+            entity_name: r.entity_name,
+            fleet_name: r.fleet_name,
+        };
+        e.save(&args.enrollment_file)?;
+        enrollment = Some(e);
+    } else if let Some(e) = &enrollment {
+        anyhow::ensure!(
+            e.server_pin == pin.to_string(),
+            "ce host est enrôlé auprès d'un autre serveur ({})",
+            e.server
+        );
+    }
+    match &enrollment {
+        Some(e) => println!(
+            "Enrôlé dans « {} » / parc « {} » : sessions sur ticket uniquement.",
+            e.entity_name, e.fleet_name
+        ),
+        None => println!("Non enrôlé : mode développement, toute demande est acceptée."),
+    }
+    serve(rv, addr, pin, Arc::new(identity), enrollment).await
 }
 
 async fn serve(
+    mut rv: RendezvousClient,
     addr: std::net::SocketAddr,
     pin: ServerPin,
     identity: Arc<DeviceIdentity>,
+    enrollment: Option<Enrollment>,
 ) -> anyhow::Result<()> {
-    let mut rv = RendezvousClient::register(addr, pin, &identity).await?;
     println!("En ligne sur {addr}, en attente de connexions.");
 
     let mut offers: HashMap<Vec<u8>, PublicIdentity> = HashMap::new();
@@ -80,11 +144,29 @@ async fn serve(
                     rv.answer(&offer, false).await?;
                     continue;
                 };
-                println!(
-                    "Demande de {} (empreinte {}) : acceptée",
+                let decision = ticket::decide(
+                    enrollment.as_ref(),
+                    &offer.session_ticket,
+                    identity.public(),
+                    &requester,
+                    ticket::unix_now(),
+                );
+                let who = format!(
+                    "{} (empreinte {})",
                     requester.device_id(),
                     requester.fingerprint()
                 );
+                match decision {
+                    Decision::AcceptUnmanaged => println!("Demande de {who} : acceptée"),
+                    Decision::Accept(t) => {
+                        println!("Demande de {who} pour {} : acceptée", t.user_email)
+                    }
+                    Decision::Decline(e) => {
+                        println!("Demande de {who} : refusée ({e})");
+                        rv.answer(&offer, false).await?;
+                        continue;
+                    }
+                }
                 rv.answer(&offer, true).await?;
                 offers.insert(offer.session_id.clone(), requester);
             }

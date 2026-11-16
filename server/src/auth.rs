@@ -9,6 +9,7 @@ pub const MIN_PASSWORD_LEN: usize = 12;
 /// Durée de vie d'un jeton de session d'API.
 pub const TOKEN_TTL_SECS: i64 = 12 * 3600;
 const TOKEN_PREFIX: &str = "crm_";
+const ENROLLMENT_PREFIX: &str = "cre_";
 
 pub fn hash_password(password: &str) -> String {
     let salt = SaltString::generate(&mut OsRng);
@@ -36,11 +37,20 @@ pub fn dummy_hash() -> &'static str {
     DUMMY.get_or_init(|| hash_password("creamote-dummy-password"))
 }
 
-/// Nouveau jeton : (valeur à remettre au client, haché à stocker).
+/// Nouveau jeton d'API : (valeur à remettre au client, haché à stocker).
 pub fn new_token() -> (String, String) {
+    prefixed_token(TOKEN_PREFIX)
+}
+
+/// Nouveau jeton d'enrôlement de machines : (valeur, haché).
+pub fn new_enrollment_token() -> (String, String) {
+    prefixed_token(ENROLLMENT_PREFIX)
+}
+
+fn prefixed_token(prefix: &str) -> (String, String) {
     let mut raw = [0u8; 32];
     OsRng.fill_bytes(&mut raw);
-    let token = format!("{TOKEN_PREFIX}{}", hex(&raw));
+    let token = format!("{prefix}{}", hex(&raw));
     let hash = token_hash(&token);
     (token, hash)
 }
@@ -49,7 +59,7 @@ pub fn token_hash(token: &str) -> String {
     blake3::hash(token.as_bytes()).to_hex().to_string()
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 

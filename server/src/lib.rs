@@ -26,12 +26,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use creamote_crypto::{DeviceId, PublicIdentity};
+use creamote_crypto::{DeviceId, DeviceIdentity, PublicIdentity};
 use creamote_net::tls::{ServerCert, ServerPin};
-use creamote_net::{RegisterStatus, RejectReason, frame, ident};
+use creamote_net::{EnrollStatus, RegisterStatus, RejectReason, frame, ident};
 use creamote_proto::rendezvous::v1::{
-    ConnectAnswer, ConnectOffer, ConnectRejected, ConnectRequest, RegisterPeer,
-    RegisterPeerResponse, RelayGrant, RelayJoin, RendezvousMessage, ServerPolicy,
+    ConnectAnswer, ConnectOffer, ConnectRejected, ConnectRequest, EnrollRequest, EnrollResponse,
+    RegisterPeer, RegisterPeerResponse, RelayGrant, RelayJoin, RendezvousMessage, ServerPolicy,
     rendezvous_message::Kind,
 };
 use quinn::{RecvStream, SendStream};
@@ -48,6 +48,8 @@ type Pipe = Join<RecvStream, SendStream>;
 const FIRST_MESSAGE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Durée de vie d'une offre sans réponse.
 const OFFER_TTL: Duration = Duration::from_secs(60);
+/// Fichier de la clé qui signe les tickets de session.
+const TICKET_KEY_FILE: &str = "ticket-signing.key";
 
 /// Limites appliquées par le serveur.
 #[derive(Debug, Clone)]
@@ -133,20 +135,16 @@ impl Server {
             Some(url) => Some(db::Db::connect(url).await?),
             None => None,
         };
-        let api = match (config.api_listen, &db) {
-            (Some(addr), Some(db)) => {
-                let listener = tokio::net::TcpListener::bind(addr).await?;
-                let local = listener.local_addr()?;
-                let app = api::router(db.clone());
-                let task = tokio::spawn(async move {
-                    if let Err(e) = axum::serve(listener, app).await {
-                        tracing::error!("API HTTP arrêtée : {e}");
-                    }
-                });
-                Some((local, task))
+        // Clé de signature des tickets : persistante à côté du certificat.
+        let ticket_key = match (&db, &config.data_dir) {
+            (None, _) => None,
+            (Some(_), Some(dir)) => {
+                std::fs::create_dir_all(dir)?;
+                Some(Arc::new(
+                    creamote_crypto::store::load_or_create(&dir.join(TICKET_KEY_FILE))?.0,
+                ))
             }
-            (Some(_), None) => anyhow::bail!("l'API de gestion exige une base de données"),
-            _ => None,
+            (Some(_), None) => Some(Arc::new(DeviceIdentity::generate())),
         };
         let endpoint = quinn::Endpoint::server(cert.quic_server_config()?, config.listen)?;
 
@@ -156,12 +154,32 @@ impl Server {
             relay_addr: config.relay_addr.unwrap_or_default(),
             policy: config.policy,
             permits,
+            db: db.clone(),
+            ticket_key: ticket_key.clone(),
             peers: Mutex::default(),
             pending: Mutex::default(),
             relays: Mutex::default(),
             ip_sessions: Arc::default(),
             next_conn: AtomicU64::new(1),
         });
+
+        let api = match (config.api_listen, &db, ticket_key) {
+            (Some(addr), Some(db), Some(ticket_key)) => {
+                let listener = tokio::net::TcpListener::bind(addr).await?;
+                let local = listener.local_addr()?;
+                let st = state.clone();
+                let online: api::Online = Arc::new(move |key: &[u8; 32]| st.is_online(key));
+                let app = api::router(db.clone(), ticket_key, online);
+                let task = tokio::spawn(async move {
+                    if let Err(e) = axum::serve(listener, app).await {
+                        tracing::error!("API HTTP arrêtée : {e}");
+                    }
+                });
+                Some((local, task))
+            }
+            (Some(_), _, _) => anyhow::bail!("l'API de gestion exige une base de données"),
+            _ => None,
+        };
 
         let ep = endpoint.clone();
         let task = tokio::spawn(async move {
@@ -276,11 +294,24 @@ struct State {
     policy: Policy,
     relay_addr: String,
     permits: Option<Arc<Semaphore>>,
+    db: Option<db::Db>,
+    ticket_key: Option<Arc<DeviceIdentity>>,
     peers: Mutex<HashMap<DeviceId, Peer>>,
     pending: Mutex<HashMap<SessionId, Pending>>,
     relays: Mutex<HashMap<SessionId, RelaySlot>>,
     ip_sessions: IpCounts,
     next_conn: AtomicU64,
+}
+
+impl State {
+    /// La machine de clé `key` a-t-elle un flux de contrôle ouvert ?
+    fn is_online(&self, key: &[u8; 32]) -> bool {
+        self.peers
+            .lock()
+            .expect("verrou sain")
+            .get(&DeviceId::from_signing_key(key))
+            .is_some_and(|p| p.identity.signing_key() == key)
+    }
 }
 
 fn msg(kind: Kind) -> RendezvousMessage {
@@ -390,6 +421,12 @@ async fn control_stream(
 
     let r = respond(RegisterStatus::Ok, device_id.to_string());
     frame::write_msg(&mut send, &msg(Kind::RegisterPeerResponse(r))).await?;
+    if let Some(db) = &state.db {
+        if let Err(e) = db.touch_device(&auth::hex(identity.signing_key())).await {
+            tracing::warn!("mise à jour de last_seen impossible : {e}");
+        }
+    }
+    let platform = platform_name(reg.platform());
 
     let writer = tokio::spawn(async move {
         while let Some(m) = rx.recv().await {
@@ -405,6 +442,10 @@ async fn control_stream(
                 handle_request(&state, &identity, &conn, &tx, req);
             }
             Some(Kind::ConnectAnswer(ans)) => handle_answer(&state, device_id, &tx, ans),
+            Some(Kind::EnrollRequest(req)) => {
+                let r = handle_enroll(&state, &identity, platform, req).await;
+                let _ = tx.send(msg(Kind::EnrollResponse(r))).await;
+            }
             _ => tracing::debug!(%device_id, "message inattendu ignoré"),
         }
     }
@@ -416,6 +457,83 @@ async fn control_stream(
         tracing::info!(%device_id, "pair déconnecté");
     }
     Ok(())
+}
+
+fn platform_name(p: creamote_proto::common::v1::Platform) -> &'static str {
+    use creamote_proto::common::v1::Platform;
+    match p {
+        Platform::Windows => "windows",
+        Platform::Macos => "macos",
+        Platform::Linux => "linux",
+        Platform::Android => "android",
+        Platform::Unspecified => "unknown",
+    }
+}
+
+async fn handle_enroll(
+    state: &State,
+    identity: &PublicIdentity,
+    platform: &str,
+    req: EnrollRequest,
+) -> EnrollResponse {
+    let reply = |status: EnrollStatus| EnrollResponse {
+        status: status as i32,
+        ..Default::default()
+    };
+    let (Some(db), Some(key)) = (&state.db, &state.ticket_key) else {
+        return reply(EnrollStatus::Unavailable);
+    };
+    let device_id = identity.device_id();
+    let name: String = req.name.trim().chars().take(200).collect();
+    let name = if name.is_empty() {
+        device_id.to_string()
+    } else {
+        name
+    };
+    let outcome = db
+        .enroll_device(
+            &req.token,
+            &auth::hex(identity.signing_key()),
+            &format!("{:09}", device_id.as_u32()),
+            &name,
+            platform,
+        )
+        .await;
+    match outcome {
+        Ok(db::Enrollment::Enrolled {
+            device_row_id,
+            entity_id,
+            entity_name,
+            fleet_name,
+        }) => {
+            tracing::info!(%device_id, entity = %entity_id, "machine enrôlée");
+            let detail = serde_json::json!({ "device_id": device_id.to_string(), "name": name });
+            if let Err(e) = db
+                .audit(
+                    Some(&entity_id),
+                    None,
+                    "device.enroll",
+                    &device_row_id,
+                    detail,
+                )
+                .await
+            {
+                tracing::warn!("audit impossible : {e}");
+            }
+            EnrollResponse {
+                status: EnrollStatus::Ok as i32,
+                entity_name,
+                fleet_name,
+                ticket_public_key: key.public().signing_key().to_vec(),
+            }
+        }
+        Ok(db::Enrollment::InvalidToken) => reply(EnrollStatus::InvalidToken),
+        Ok(db::Enrollment::AlreadyEnrolled) => reply(EnrollStatus::AlreadyEnrolled),
+        Err(e) => {
+            tracing::error!("enrôlement : {e}");
+            reply(EnrollStatus::Unavailable)
+        }
+    }
 }
 
 fn handle_request(

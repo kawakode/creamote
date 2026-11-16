@@ -9,7 +9,10 @@
 //! proxy TLS (Caddy, nginx…), ou laissez-la sur 127.0.0.1.
 
 mod account;
+mod device;
 mod entity;
+
+use std::sync::Arc;
 
 use axum::extract::FromRequestParts;
 use axum::http::StatusCode;
@@ -17,18 +20,25 @@ use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
+use creamote_crypto::DeviceIdentity;
 use serde::Serialize;
 use sqlx::Row;
 
 use crate::db::{Db, now};
-use crate::rbac::{self, Permissions, Target};
+use crate::rbac::{self, FleetTree, Grant, Permissions, Target};
+
+/// Indique si la machine de clé publique donnée est connectée au rendezvous.
+pub type Online = Arc<dyn Fn(&[u8; 32]) -> bool + Send + Sync>;
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: Db,
+    /// Clé qui signe les tickets de session.
+    pub ticket_key: Arc<DeviceIdentity>,
+    pub online: Online,
 }
 
-pub fn router(db: Db) -> Router {
+pub fn router(db: Db, ticket_key: Arc<DeviceIdentity>, online: Online) -> Router {
     let api = Router::new()
         .route("/auth/login", post(account::login))
         .route("/auth/logout", post(account::logout))
@@ -88,10 +98,28 @@ pub fn router(db: Db) -> Router {
             "/entities/{eid}/bindings/{bid}",
             delete(entity::delete_binding),
         )
-        .route("/entities/{eid}/audit", get(entity::audit));
-    Router::new()
-        .nest("/api/v1", api)
-        .with_state(AppState { db })
+        .route("/entities/{eid}/audit", get(entity::audit))
+        .route(
+            "/entities/{eid}/enrollment-tokens",
+            get(device::list_tokens).post(device::create_token),
+        )
+        .route(
+            "/entities/{eid}/enrollment-tokens/{tid}",
+            delete(device::delete_token),
+        )
+        .route("/entities/{eid}/devices", get(device::list))
+        .route(
+            "/entities/{eid}/devices/{did}",
+            get(device::get_one)
+                .patch(device::update)
+                .delete(device::remove),
+        )
+        .route("/tickets", post(device::issue_ticket));
+    Router::new().nest("/api/v1", api).with_state(AppState {
+        db,
+        ticket_key,
+        online,
+    })
 }
 
 /// Erreur d'API, rendue en JSON `{ "error": code, "message": texte }`.
@@ -194,28 +222,63 @@ impl FromRequestParts<AppState> for CurrentUser {
     }
 }
 
+/// Droits d'un utilisateur dans une entité, chargés une fois pour évaluer
+/// plusieurs cibles (ex. filtrer une liste de machines).
+pub struct Access {
+    superadmin: bool,
+    grants: Vec<Grant>,
+    tree: FleetTree,
+}
+
+impl Access {
+    pub fn on(&self, target: Target<'_>) -> Permissions {
+        if self.superadmin {
+            Permissions::ALL
+        } else {
+            rbac::effective(&self.grants, &self.tree, target)
+        }
+    }
+
+    pub fn tree(&self) -> &FleetTree {
+        &self.tree
+    }
+}
+
 impl AppState {
-    /// Permissions de `user` sur `target` dans l'entité. 404 si l'entité
-    /// n'existe pas ou si l'utilisateur n'en est pas membre.
+    /// Droits de `user` dans l'entité. 404 si l'entité n'existe pas ou si
+    /// l'utilisateur n'en est pas membre.
+    pub async fn access(&self, user: &CurrentUser, entity_id: &str) -> ApiResult<Access> {
+        if user.is_superadmin {
+            let exists = sqlx::query("SELECT 1 FROM entities WHERE id = $1")
+                .bind(entity_id)
+                .fetch_optional(self.db.pool())
+                .await?;
+            exists.ok_or(ApiError::NotFound)?;
+            return Ok(Access {
+                superadmin: true,
+                grants: Vec::new(),
+                tree: self.db.fleet_tree(entity_id).await?,
+            });
+        }
+        if !self.db.is_member(entity_id, &user.id).await? {
+            return Err(ApiError::NotFound);
+        }
+        Ok(Access {
+            superadmin: false,
+            grants: self.db.grants_for(entity_id, &user.id).await?,
+            tree: self.db.fleet_tree(entity_id).await?,
+        })
+    }
+
+    /// Permissions de `user` sur `target` dans l'entité (404 comme
+    /// [`Self::access`]).
     pub async fn permissions(
         &self,
         user: &CurrentUser,
         entity_id: &str,
         target: Target<'_>,
     ) -> ApiResult<Permissions> {
-        if user.is_superadmin {
-            let exists = sqlx::query("SELECT 1 FROM entities WHERE id = $1")
-                .bind(entity_id)
-                .fetch_optional(self.db.pool())
-                .await?;
-            return exists.map(|_| Permissions::ALL).ok_or(ApiError::NotFound);
-        }
-        if !self.db.is_member(entity_id, &user.id).await? {
-            return Err(ApiError::NotFound);
-        }
-        let grants = self.db.grants_for(entity_id, &user.id).await?;
-        let tree = self.db.fleet_tree(entity_id).await?;
-        Ok(rbac::effective(&grants, &tree, target))
+        Ok(self.access(user, entity_id).await?.on(target))
     }
 
     /// Exige la permission `needed` (403 sinon).

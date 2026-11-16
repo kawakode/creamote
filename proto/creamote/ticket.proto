@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package creamote.ticket.v1;
+
+// Ticket de session émis par le serveur de gestion pour un utilisateur
+// authentifié, et vérifié par le host avec la clé du serveur épinglée lors de
+// l'enrôlement. Il est lié aux deux appareils : inutilisable par un autre
+// viewer que celui dont la clé y figure.
+message SessionTicket {
+  uint32 version = 1;
+  // Clé d'identité Ed25519 du host visé.
+  bytes host_signing_key = 2;
+  // Clé d'identité Ed25519 du viewer autorisé.
+  bytes viewer_signing_key = 3;
+  string user_id = 4;
+  string user_email = 5;
+  // Masque de permissions (voir creamote_proto::permissions).
+  uint64 permissions = 6;
+  // Secondes Unix.
+  int64 issued_at = 7;
+  int64 expires_at = 8;
+  string entity_id = 9;
+}
+
+// Signature Ed25519 de "creamote/ticket/v1" || ticket, par la clé de tickets
+// du serveur.
+message SignedTicket {
+  bytes ticket = 1;
+  bytes signature = 2;
+}

@@ -10,15 +10,16 @@ use std::net::SocketAddr;
 use creamote_crypto::{DeviceId, DeviceIdentity};
 use creamote_proto::common::v1::Platform;
 use creamote_proto::rendezvous::v1::{
-    ConnectAnswer, ConnectRequest, RegisterPeer, RendezvousMessage, rendezvous_message::Kind,
+    ConnectAnswer, ConnectRequest, EnrollRequest, RegisterPeer, RendezvousMessage,
+    rendezvous_message::Kind,
 };
 pub use creamote_proto::rendezvous::v1::{
-    ConnectOffer, ConnectRejected, RegisterPeerResponse, RelayGrant,
+    ConnectOffer, ConnectRejected, EnrollResponse, RegisterPeerResponse, RelayGrant,
 };
 use rand_core::{OsRng, RngCore};
 
 use crate::tls::ServerPin;
-use crate::{NetError, RegisterStatus, RejectReason, Result, frame, ident};
+use crate::{EnrollStatus, NetError, RegisterStatus, RejectReason, Result, frame, ident};
 
 /// Événement reçu du serveur.
 #[derive(Debug, Clone, PartialEq)]
@@ -121,13 +122,48 @@ impl RendezvousClient {
         }
     }
 
+    /// Enrôle cet appareil dans le parc désigné par un jeton d'enrôlement.
+    pub async fn enroll(&mut self, token: &str, name: &str) -> Result<EnrollResponse> {
+        frame::write_msg(
+            &mut self.send,
+            &RendezvousMessage {
+                kind: Some(Kind::EnrollRequest(EnrollRequest {
+                    token: token.to_owned(),
+                    name: name.to_owned(),
+                })),
+            },
+        )
+        .await?;
+        loop {
+            let msg: RendezvousMessage = frame::read_msg(&mut self.recv)
+                .await?
+                .ok_or(NetError::Closed)?;
+            if let Some(Kind::EnrollResponse(r)) = msg.kind {
+                return match r.status() {
+                    EnrollStatus::Ok => Ok(r),
+                    other => Err(NetError::Enrollment(other)),
+                };
+            }
+        }
+    }
+
     /// Demande une session vers `target` et attend le jeton relay.
     pub async fn request_session(&mut self, target: DeviceId) -> Result<RelayGrant> {
+        self.request_session_with_ticket(target, Vec::new()).await
+    }
+
+    /// Comme [`Self::request_session`], avec un ticket signé par le serveur de
+    /// gestion (exigé par un host enrôlé).
+    pub async fn request_session_with_ticket(
+        &mut self,
+        target: DeviceId,
+        session_ticket: Vec<u8>,
+    ) -> Result<RelayGrant> {
         let request_id = OsRng.next_u64().max(1);
         let req = ConnectRequest {
             target_device_id: target.to_string(),
             requester: None,
-            session_ticket: Vec::new(),
+            session_ticket,
             request_id,
         };
         frame::write_msg(

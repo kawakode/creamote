@@ -184,6 +184,100 @@ impl Db {
     }
 }
 
+/// Résultat d'une demande d'enrôlement.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Enrollment {
+    Enrolled {
+        device_row_id: String,
+        entity_id: String,
+        entity_name: String,
+        fleet_name: String,
+    },
+    InvalidToken,
+    AlreadyEnrolled,
+}
+
+impl Db {
+    /// Enrôle une machine (identité déjà prouvée) avec un jeton d'enrôlement.
+    /// Le jeton est consommé de façon atomique.
+    pub async fn enroll_device(
+        &self,
+        token: &str,
+        signing_key_hex: &str,
+        device_id: &str,
+        name: &str,
+        platform: &str,
+    ) -> sqlx::Result<Enrollment> {
+        let mut tx = self.pool.begin().await?;
+        let hash = crate::auth::token_hash(token.trim());
+        let row = sqlx::query(
+            "SELECT t.id, t.entity_id, t.fleet_id, e.name AS entity_name, f.name AS fleet_name \
+             FROM enrollment_tokens t JOIN entities e ON e.id = t.entity_id \
+             JOIN fleets f ON f.id = t.fleet_id \
+             WHERE t.token_hash = $1 AND t.expires_at > $2 AND t.uses_left > 0",
+        )
+        .bind(&hash)
+        .bind(now())
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(row) = row else {
+            return Ok(Enrollment::InvalidToken);
+        };
+        let known = sqlx::query("SELECT 1 FROM devices WHERE signing_key = $1")
+            .bind(signing_key_hex)
+            .fetch_optional(&mut *tx)
+            .await?;
+        if known.is_some() {
+            return Ok(Enrollment::AlreadyEnrolled);
+        }
+        let token_id: String = row.get("id");
+        let used = sqlx::query(
+            "UPDATE enrollment_tokens SET uses_left = uses_left - 1 WHERE id = $1 AND uses_left > 0",
+        )
+        .bind(&token_id)
+        .execute(&mut *tx)
+        .await?;
+        if used.rows_affected() != 1 {
+            return Ok(Enrollment::InvalidToken);
+        }
+        let id = new_id();
+        let entity_id: String = row.get("entity_id");
+        let at = now();
+        sqlx::query(
+            "INSERT INTO devices (id, entity_id, fleet_id, device_id, signing_key, name, platform, enrolled_at, last_seen) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+        )
+        .bind(&id)
+        .bind(&entity_id)
+        .bind(row.get::<String, _>("fleet_id"))
+        .bind(device_id)
+        .bind(signing_key_hex)
+        .bind(name)
+        .bind(platform)
+        .bind(at)
+        .bind(at)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(Enrollment::Enrolled {
+            device_row_id: id,
+            entity_id,
+            entity_name: row.get("entity_name"),
+            fleet_name: row.get("fleet_name"),
+        })
+    }
+
+    /// Note la dernière présence d'une machine enrôlée.
+    pub async fn touch_device(&self, signing_key_hex: &str) -> sqlx::Result<()> {
+        sqlx::query("UPDATE devices SET last_seen = $1 WHERE signing_key = $2")
+            .bind(now())
+            .bind(signing_key_hex)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+}
+
 pub fn normalize_email(email: &str) -> String {
     email.trim().to_lowercase()
 }
