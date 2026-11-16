@@ -25,8 +25,24 @@ pub struct LoginRequest {
 
 #[derive(Serialize)]
 pub struct LoginResponse {
-    token: String,
-    expires_at: i64,
+    pub token: String,
+    pub expires_at: i64,
+}
+
+/// Ouvre une session d'API pour un utilisateur : (jeton, expiration).
+pub async fn open_session(st: &AppState, user_id: &str) -> ApiResult<(String, i64)> {
+    let (token, token_hash) = auth::new_token();
+    let expires_at = now() + auth::TOKEN_TTL_SECS;
+    sqlx::query(
+        "INSERT INTO api_sessions (token_hash, user_id, created_at, expires_at) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(&token_hash)
+    .bind(user_id)
+    .bind(now())
+    .bind(expires_at)
+    .execute(st.db.pool())
+    .await?;
+    Ok((token, expires_at))
 }
 
 /// Compte et secret TOTP, pour la connexion et les opérations sensibles.
@@ -145,19 +161,15 @@ pub async fn login(
     }
     st.limiter.success(&email);
 
-    let (token, token_hash) = auth::new_token();
-    let expires_at = now() + auth::TOKEN_TTL_SECS;
-    sqlx::query(
-        "INSERT INTO api_sessions (token_hash, user_id, created_at, expires_at) VALUES ($1, $2, $3, $4)",
-    )
-    .bind(&token_hash)
-    .bind(&c.id)
-    .bind(now())
-    .bind(expires_at)
-    .execute(st.db.pool())
-    .await?;
+    let (token, expires_at) = open_session(&st, &c.id).await?;
     st.db
-        .audit(None, Some(&c.id), "auth.login", &c.id, json!({}))
+        .audit(
+            None,
+            Some(&c.id),
+            "auth.login",
+            &c.id,
+            json!({ "method": "password" }),
+        )
         .await?;
     Ok(Json(LoginResponse { token, expires_at }))
 }
@@ -414,6 +426,8 @@ pub struct UserOut {
     is_superadmin: bool,
     disabled: bool,
     totp_enabled: bool,
+    /// Compte lié à une identité OIDC.
+    sso_linked: bool,
 }
 
 pub async fn list_users(
@@ -422,7 +436,7 @@ pub async fn list_users(
 ) -> ApiResult<Json<Vec<UserOut>>> {
     require_superadmin(&user)?;
     let rows = sqlx::query(
-        "SELECT id, email, display_name, is_superadmin, disabled, totp_enabled FROM users ORDER BY email",
+        "SELECT id, email, display_name, is_superadmin, disabled, totp_enabled, oidc_subject FROM users ORDER BY email",
     )
     .fetch_all(st.db.pool())
     .await?;
@@ -435,6 +449,7 @@ pub async fn list_users(
                 is_superadmin: r.get::<i64, _>("is_superadmin") != 0,
                 disabled: r.get::<i64, _>("disabled") != 0,
                 totp_enabled: r.get::<i64, _>("totp_enabled") != 0,
+                sso_linked: r.get::<Option<String>, _>("oidc_subject").is_some(),
             })
             .collect(),
     ))

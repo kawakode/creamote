@@ -33,6 +33,29 @@ applications d'authentification courantes ; un code accepté ne peut pas être
 réutilisé. Un code de secours (`xxxx-xxxx`) remplace un code TOTP, une seule
 fois.
 
+**Connexion SSO (OpenID Connect).** Avec `--oidc-issuer`, `--oidc-client-id`,
+`--public-url` (et le secret dans `CREAMOTE_OIDC_CLIENT_SECRET`), la console
+propose « Se connecter avec … » (libellé : `--oidc-name`). Déclarez chez le
+fournisseur l'URL de retour `<public-url>/api/v1/auth/oidc/callback`.
+
+| Méthode | Chemin | Rôle |
+| --- | --- | --- |
+| GET | `/auth/methods` | méthodes proposées : `{ password, oidc: { name } \| null }` |
+| GET | `/auth/oidc/start` | redirige vers le fournisseur |
+| GET | `/auth/oidc/callback` | retour du fournisseur ; redirige vers la console (`/#/oidc/<code>` ou `/#/oidc-error/<raison>`) |
+| POST | `/auth/oidc/exchange` | `{ code }` → `{ token, expires_at }` ; code à usage unique, valable 60 s |
+
+Flux « authorization code » avec PKCE (S256), `state` et `nonce` à usage
+unique. Le jeton d'identité est vérifié avec les clés JWKS du fournisseur
+(algorithmes asymétriques uniquement : RS, PS, ES, EdDSA), ainsi que
+l'émetteur, l'audience (et `azp` si plusieurs audiences), l'expiration et le
+nonce. Les comptes ne sont **jamais créés automatiquement** : à la première
+connexion, l'identité est liée au compte existant de même e-mail, si le
+fournisseur déclare l'e-mail vérifié (`--oidc-allow-unverified-email` pour
+Entra ID, qui n'envoie pas `email_verified`) ; ensuite, seul ce lien compte.
+Un compte déjà lié à une autre identité est refusé. La double authentification
+locale ne s'applique pas à une connexion SSO : elle relève du fournisseur.
+
 **Limitation des tentatives.** Après 5 échecs en 15 minutes sur un compte, ou
 30 depuis une même adresse IP, `/auth/login` répond 429 avec `Retry-After`,
 même avec le bon mot de passe. Derrière un reverse proxy, lancez le serveur

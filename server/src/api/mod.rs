@@ -13,6 +13,7 @@ mod book;
 mod console;
 mod device;
 mod entity;
+mod sso;
 
 use std::sync::Arc;
 
@@ -51,6 +52,8 @@ pub struct Services {
     /// connaître l'adresse du client.
     pub trust_forwarded_for: bool,
     pub login_limits: Limits,
+    /// Connexion OpenID Connect, si configurée.
+    pub oidc: Option<Arc<crate::oidc::Oidc>>,
 }
 
 impl Services {
@@ -63,6 +66,7 @@ impl Services {
             server_address: None,
             trust_forwarded_for: false,
             login_limits: Limits::default(),
+            oidc: None,
         }
     }
 }
@@ -77,6 +81,7 @@ pub struct AppState {
     pub server_address: Option<String>,
     pub trust_forwarded_for: bool,
     pub limiter: Arc<LoginLimiter>,
+    pub oidc: Option<Arc<crate::oidc::Oidc>>,
 }
 
 /// API (`/api/v1`) et console web d'administration (`/`).
@@ -84,6 +89,10 @@ pub fn router(db: Db, services: Services) -> Router {
     let api = Router::new()
         .route("/auth/login", post(account::login))
         .route("/auth/logout", post(account::logout))
+        .route("/auth/methods", get(sso::methods))
+        .route("/auth/oidc/start", get(sso::start))
+        .route("/auth/oidc/callback", get(sso::callback))
+        .route("/auth/oidc/exchange", post(sso::exchange))
         .route("/me", get(account::me))
         .route("/me/totp/setup", post(account::totp_setup))
         .route("/me/totp/enable", post(account::totp_enable))
@@ -175,6 +184,7 @@ pub fn router(db: Db, services: Services) -> Router {
         server_address: services.server_address,
         trust_forwarded_for: services.trust_forwarded_for,
         limiter: Arc::new(LoginLimiter::new(services.login_limits)),
+        oidc: services.oidc,
     };
     Router::new()
         .nest(

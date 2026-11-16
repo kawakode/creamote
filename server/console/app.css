@@ -147,3 +147,6 @@ img.qr { display: block; background: #fff; padding: 8px; border-radius: 6px; mar
 code.secret { font-size: 15px; letter-spacing: .05em; }
 pre.codes { columns: 2; max-width: 360px; font-size: 15px; }
 [hidden] { display: none !important; }
+.sso { display: grid; gap: 8px; margin-bottom: 12px; }
+.sso-button { width: 100%; padding: 10px 12px; }
+.sso .or { text-align: center; margin: 0; }

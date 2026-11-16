@@ -27,6 +27,7 @@ const ACTIONS = {
   "auth.totp_disable": "Double authentification désactivée",
   "auth.totp_reset": "Double authentification réinitialisée",
   "auth.recovery_code_used": "Code de secours utilisé",
+  "auth.oidc_link": "Compte lié au SSO",
   "user.create": "Utilisateur créé",
   "entity.create": "Entité créée",
   "entity.delete": "Entité supprimée",
@@ -257,11 +258,49 @@ function loginView() {
     h("label", {}, "Mot de passe", h("input", { name: "password", type: "password", required: true, autocomplete: "current-password" })),
     codeField,
     h("button", { class: "primary", type: "submit" }, "Se connecter"));
+  const sso = h("div", { class: "sso" });
+  // Bouton SSO si le serveur propose OIDC.
+  fetch("/api/v1/auth/methods", { credentials: "omit", cache: "no-store" })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((m) => {
+      if (!m?.oidc) return;
+      sso.replaceChildren(
+        h("button", { type: "button", class: "primary sso-button", onclick: () => { location.href = "/api/v1/auth/oidc/start"; } },
+          `Se connecter avec ${m.oidc.name}`),
+        h("p", { class: "muted small or" }, "ou avec un mot de passe"));
+    })
+    .catch(() => {});
   return h("main", { class: "login" },
     h("h1", {}, "Creamote"),
     h("p", { class: "muted" }, "Console d'administration"),
     h("div", { id: "flash" }),
+    sso,
     form);
+}
+
+const OIDC_ERRORS = {
+  no_account: "Aucun compte Creamote ne correspond à cette identité. Demandez à un administrateur de créer votre compte avec la même adresse e-mail.",
+  unverified: "Votre fournisseur d'identité n'a pas confirmé votre adresse e-mail.",
+  conflict: "Ce compte Creamote est déjà lié à une autre identité. Contactez un administrateur.",
+  disabled: "Ce compte est désactivé.",
+  denied: "Connexion annulée ou refusée par le fournisseur d'identité.",
+  state: "La connexion a expiré. Réessayez.",
+  token: "La réponse du fournisseur d'identité est invalide. Contactez un administrateur.",
+  provider: "Le fournisseur d'identité est injoignable. Réessayez plus tard.",
+};
+
+/// Retour du SSO : échange du code à usage unique contre un jeton d'API.
+async function finishOidc(code) {
+  history.replaceState(null, "", "#/login");
+  try {
+    const r = await api("POST", "/auth/oidc/exchange", { code });
+    storage.set(r.token);
+    state.me = null;
+    location.hash = "#/";
+  } catch {
+    app().replaceChildren(loginView());
+    flash(OIDC_ERRORS.state, "error");
+  }
 }
 
 function shell(content) {
@@ -322,7 +361,7 @@ async function usersView() {
       u.email, u.display_name,
       u.is_superadmin ? h("span", { class: "pill" }, "super-admin") : "",
       u.disabled ? "désactivé" : "actif",
-      u.totp_enabled ? "active" : h("span", { class: "muted" }, "inactive"),
+      h("span", {}, u.totp_enabled ? "active" : h("span", { class: "muted" }, "inactive"), u.sso_linked ? h("span", { class: "pill" }, "SSO") : null),
       u.totp_enabled && u.id !== state.me.user.id
         ? h("td", { class: "actions" }, dangerButton("Réinitialiser la 2FA", async () => {
           await post(`/users/${u.id}/totp/reset`);
@@ -768,6 +807,15 @@ let renderSeq = 0;
 async function render() {
   const seq = ++renderSeq;
   const parts = route();
+  if (parts[0] === "oidc" && parts[1]) { await finishOidc(parts[1]); return; }
+  if (parts[0] === "oidc-error") {
+    history.replaceState(null, "", "#/login");
+    storage.set(null);
+    state.me = null;
+    app().replaceChildren(loginView());
+    flash(OIDC_ERRORS[parts[1]] || OIDC_ERRORS.token, "error");
+    return;
+  }
   if (!storage.get()) {
     if (parts[0] !== "login") { location.hash = "#/login"; return; }
     // Ne pas reconstruire le formulaire déjà affiché (on perdrait la saisie).

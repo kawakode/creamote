@@ -51,6 +51,25 @@ struct Args {
     /// client peut contourner la limitation des tentatives de connexion.
     #[arg(long, env = "CREAMOTE_TRUST_FORWARDED_FOR")]
     trust_forwarded_for: bool,
+    /// URL publique de la console (`https://admin.example.org`), exigée par
+    /// la connexion OIDC pour l'URL de retour.
+    #[arg(long, env = "CREAMOTE_PUBLIC_URL")]
+    public_url: Option<String>,
+    /// Émetteur OpenID Connect (active la connexion SSO).
+    #[arg(long, env = "CREAMOTE_OIDC_ISSUER", requires_all = ["oidc_client_id", "public_url"])]
+    oidc_issuer: Option<String>,
+    #[arg(long, env = "CREAMOTE_OIDC_CLIENT_ID")]
+    oidc_client_id: Option<String>,
+    /// Secret du client OIDC (préférez la variable d'environnement).
+    #[arg(long, env = "CREAMOTE_OIDC_CLIENT_SECRET", hide_env_values = true)]
+    oidc_client_secret: Option<String>,
+    /// Libellé du bouton de connexion SSO.
+    #[arg(long, env = "CREAMOTE_OIDC_NAME", default_value = "SSO")]
+    oidc_name: String,
+    /// Accepter les e-mails que le fournisseur ne déclare pas vérifiés
+    /// (nécessaire pour Entra ID, qui n'envoie pas `email_verified`).
+    #[arg(long, env = "CREAMOTE_OIDC_ALLOW_UNVERIFIED_EMAIL")]
+    oidc_allow_unverified_email: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -133,6 +152,7 @@ async fn main() -> anyhow::Result<()> {
         (Some(database_url), Some(args.api_listen))
     };
 
+    let args_public_url = args.public_url.clone();
     let server = Server::start(Config {
         listen: args.listen,
         data_dir: Some(args.data_dir),
@@ -141,6 +161,16 @@ async fn main() -> anyhow::Result<()> {
         database_url,
         api_listen,
         trust_forwarded_for: args.trust_forwarded_for,
+        oidc: args
+            .oidc_issuer
+            .map(|issuer| creamote_server::oidc::OidcConfig {
+                issuer,
+                client_id: args.oidc_client_id.unwrap_or_default(),
+                client_secret: args.oidc_client_secret,
+                public_url: args.public_url.clone().unwrap_or_default(),
+                display_name: args.oidc_name,
+                allow_unverified_email: args.oidc_allow_unverified_email,
+            }),
     })
     .await?;
 
@@ -163,6 +193,9 @@ async fn main() -> anyhow::Result<()> {
         Some(a) => {
             println!("API        : http://{a}/api/v1");
             println!("Console    : http://{a}/");
+            if let Some(url) = &args_public_url {
+                println!("URL publique : {url}");
+            }
         }
         None => println!("API        : désactivée (mode public)"),
     }

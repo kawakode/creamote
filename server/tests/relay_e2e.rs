@@ -23,6 +23,7 @@ async fn start(policy: Policy) -> (Server, SocketAddr, ServerPin) {
         database_url: None,
         api_listen: None,
         trust_forwarded_for: false,
+        oidc: None,
     })
     .await
     .unwrap();
