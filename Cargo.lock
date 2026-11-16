@@ -746,6 +746,7 @@ dependencies = [
  "creamote-input",
  "creamote-net",
  "creamote-proto",
+ "creamote-transfer",
  "prost",
  "thiserror",
  "tokio",

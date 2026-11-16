@@ -13,6 +13,7 @@ creamote-net.workspace = true
 creamote-capture.workspace = true
 creamote-codec.workspace = true
 creamote-input.workspace = true
+creamote-transfer.workspace = true
 prost.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

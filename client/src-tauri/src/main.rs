@@ -228,6 +228,9 @@ async fn open(
                         let _ = frames.send(InvokeResponseBody::Raw(m));
                     }
                 },
+                // Transfert de fichiers : pas encore proposé par cette
+                // interface (la session ne l'active pas).
+                Event::Files(_) => {}
                 Event::Ended { reason, message } => {
                     let _ = events.send(json!({
                         "type": "ended",

@@ -14,6 +14,7 @@ use pb::session_message::Kind;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 
+use crate::sharing::{Active, Sharing};
 use crate::{
     DEFAULT_FPS, EndReason, MAX_FRAMES_IN_FLIGHT, Result, SessionError, chunks, from_proto,
     intersect, recv, send, to_proto,
@@ -23,7 +24,8 @@ use crate::{
 pub const CONSENT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Délai pour recevoir le `Hello` du viewer.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(30);
-/// Permissions que ce host sait honorer (presse-papier et fichiers : M3).
+/// Permissions que ce host sait honorer sans configuration ; presse-papier
+/// et fichiers s'y ajoutent selon le [`Sharing`] passé à [`serve_with`].
 pub const SUPPORTED: Permissions = Permissions::VIEW.union(Permissions::CONTROL);
 
 /// Ce que l'utilisateur présent a répondu.
@@ -134,12 +136,28 @@ pub struct Summary {
     pub granted: Permissions,
 }
 
-/// Mène une session côté host jusqu'à sa fin.
+/// Mène une session côté host jusqu'à sa fin (sans presse-papier ni
+/// fichiers).
 pub async fn serve<R, W>(
+    tx: SecureSender<W>,
+    rx: SecureReceiver<R>,
+    policy: Policy,
+    media: Media,
+) -> Result<Summary>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    serve_with(tx, rx, policy, media, Sharing::default()).await
+}
+
+/// Comme [`serve`], avec le presse-papier et les fichiers que ce host offre.
+pub async fn serve_with<R, W>(
     mut tx: SecureSender<W>,
     mut rx: SecureReceiver<R>,
     policy: Policy,
     media: Media,
+    sharing: Sharing,
 ) -> Result<Summary>
 where
     R: AsyncRead + Unpin,
@@ -153,7 +171,8 @@ where
         Err(_) => return Err(SessionError::Protocol("pas de Hello du viewer")),
     };
     let requested = from_proto(hello.requested.as_ref());
-    let mut granted = intersect(intersect(policy.allowed, requested), SUPPORTED);
+    let supported = SUPPORTED | sharing.permissions();
+    let mut granted = intersect(intersect(policy.allowed, requested), supported);
     if !granted.contains(Permissions::VIEW) {
         send(
             &mut tx,
@@ -243,12 +262,16 @@ where
     });
 
     let control = granted.contains(Permissions::CONTROL);
+    let mut active = Active::start(sharing, granted, out_tx.clone());
     let mut stream: Option<Stream> = None;
     let result = loop {
         let msg = match recv(&mut rx).await {
             Ok(Some(m)) => m,
             Ok(None) => break Ok(()),
             Err(e) => break Err(e),
+        };
+        let Some(msg) = active.handle(msg).await else {
+            continue;
         };
         match msg {
             Kind::VideoConfig(req) => {
@@ -290,6 +313,7 @@ where
     if let Some(s) = stream.take() {
         s.stop();
     }
+    drop(active);
     drop(out_tx);
     let _ = writer.await;
     result.map(|()| Summary { granted })

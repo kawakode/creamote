@@ -29,7 +29,10 @@ use creamote_net::stream::{PeerPath, PeerStream};
 use creamote_net::ticket::{self, Decision, Enrollment};
 use creamote_net::tls::ServerPin;
 use creamote_proto::permissions::Permissions;
+use creamote_session::creamote_transfer::clipboard::{ClipboardBackend, NativeClipboard};
+use creamote_session::creamote_transfer::files::AcceptPolicy;
 use creamote_session::host::{self, Media, Policy};
+use creamote_session::{FilesConfig, Sharing};
 
 #[derive(Parser)]
 #[command(version, about = "Host Creamote")]
@@ -65,6 +68,16 @@ struct Args {
     /// communiquée aux viewers, toutes les sessions passent par le relay.
     #[arg(long)]
     relay_only: bool,
+    /// Ne partage pas le presse-papier avec les viewers.
+    #[arg(long)]
+    no_clipboard: bool,
+    /// Refuse le transfert de fichiers.
+    #[arg(long)]
+    no_files: bool,
+    /// Dossier des fichiers reçus (par défaut, `Téléchargements/Creamote`
+    /// de l'utilisateur).
+    #[arg(long)]
+    files_dir: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -155,6 +168,8 @@ async fn main() -> anyhow::Result<()> {
         enrollment,
         media: Media::native(args.encoder),
         unattended_dev: args.unattended_dev,
+        clipboard: !args.no_clipboard,
+        files_dir: (!args.no_files).then(|| args.files_dir.unwrap_or_else(default_files_dir)),
     };
     serve(rv, addr, ctx).await
 }
@@ -164,6 +179,49 @@ struct Ctx {
     enrollment: Option<Enrollment>,
     media: Media,
     unattended_dev: bool,
+    clipboard: bool,
+    files_dir: Option<PathBuf>,
+}
+
+impl Ctx {
+    /// Presse-papier natif et fichiers offerts à une session.
+    fn sharing(&self) -> Sharing {
+        let clipboard = if self.clipboard {
+            match NativeClipboard::new() {
+                Ok(c) => Some(Box::new(c) as Box<dyn ClipboardBackend>),
+                Err(e) => {
+                    tracing::warn!("presse-papier indisponible : {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        Sharing {
+            clipboard,
+            files: self.files_dir.clone().map(|dest| FilesConfig {
+                dest,
+                // L'utilisateur présent (ou le ticket) a accordé le
+                // transfert de fichiers pour cette session.
+                policy: AcceptPolicy::AcceptAll,
+                events: None,
+            }),
+        }
+    }
+}
+
+/// `Téléchargements/Creamote` (ou `Downloads/Creamote`) de l'utilisateur.
+fn default_files_dir() -> PathBuf {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let downloads = ["Téléchargements", "Downloads"]
+        .iter()
+        .map(|d| home.join(d))
+        .find(|d| d.is_dir())
+        .unwrap_or_else(|| home.join("Downloads"));
+    downloads.join("Creamote")
 }
 
 impl Ctx {
@@ -304,5 +362,5 @@ async fn session(
         chan.verification_code()
     );
     let (tx, rx) = chan.split();
-    Ok(host::serve(tx, rx, policy, ctx.media.clone()).await?)
+    Ok(host::serve_with(tx, rx, policy, ctx.media.clone(), ctx.sharing()).await?)
 }

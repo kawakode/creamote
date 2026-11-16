@@ -119,7 +119,7 @@ enum Input {
 /// boucle de session (sinon deux pairs qui s'envoient des fichiers en même
 /// temps pourraient s'attendre mutuellement). Le volume en attente reste
 /// borné par la fenêtre d'envoi de l'émetteur ([`WINDOW`]).
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct FilesHandle {
     tx: mpsc::UnboundedSender<Input>,
 }

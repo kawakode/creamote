@@ -31,7 +31,7 @@ Détails et alternatives dans [ADR 0003](adr/0003-p2p.md).
 
 ## Presse-papier et fichiers (M3)
 
-Crate `creamote-transfer`, dans le canal Noise, avec les numéros 20 à 39 de `SessionMessage`. Le host n'aiguille ces messages que si la session a la permission `clipboard` ou `file_transfer` (`creamote_transfer::route`).
+Crate `creamote-transfer`, dans le canal Noise, avec les numéros 20 à 39 de `SessionMessage`. Branchée dans `creamote-session` (`Sharing`, `host::serve_with`, `viewer::start_with`) : chaque côté choisit ce qu'il offre, le host n'accorde `clipboard` et `file_transfer` que s'il les offre et que le ticket ou l'utilisateur présent les autorise (« vue seule » les retire), et ignore les messages d'une fonction non accordée.
 
 - **Presse-papier** : texte, HTML et image (PNG), 16 Mio par format, découpés en morceaux de 48 Kio. Accès natif via `arboard` (Win32, NSPasteboard, sélections X11, data-control Wayland) ; détection des copies par `GetClipboardSequenceNumber` sous Windows, par relecture toutes les 500 ms ailleurs. Le contenu présent à l'ouverture de la session n'est pas envoyé, et une copie reçue n'est jamais renvoyée.
 - **Fichiers** : dans les deux sens, un fichier par proposition (`FileOffer`), dossiers décomposés en chemins relatifs. Acceptation automatique, à la demande ou refus. Fenêtre de 4 Mio contrôlée par accusés de réception, empreinte BLAKE3 vérifiée avant de renommer `*.creamote-part`. Chemins reçus validés pour toutes les plateformes (ni absolu, ni `..`, ni nom réservé Windows), aucun fichier existant écrasé, date de modification conservée.
