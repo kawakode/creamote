@@ -14,12 +14,31 @@ l'onglet).
 
 | Méthode | Chemin | Rôle |
 | --- | --- | --- |
-| POST | `/auth/login` | `{ email, password }` → `{ token, expires_at }` (jeton valable 12 h) |
+| POST | `/auth/login` | `{ email, password, totp_code? }` → `{ token, expires_at }` (jeton valable 12 h) |
 | POST | `/auth/logout` | révoque le jeton courant |
 | GET | `/me` | profil et entités, avec les permissions au niveau entité |
+| POST | `/me/totp/setup` | `{ password }` → `{ secret, otpauth_uri, qr_svg }` : prépare la double authentification |
+| POST | `/me/totp/enable` | `{ code }` → `{ recovery_codes }` (10 codes, montrés une seule fois) |
+| POST | `/me/totp/disable` | `{ password, code }` (code TOTP ou de secours) |
+| GET, POST | `/me/address-book` | carnet d'adresses personnel ; créer `{ label, device_id, notes? }` |
+| PATCH, DELETE | `/me/address-book/{id}` | `{ label?, device_id?, notes? }` |
 | GET | `/server-info` | `{ server_pin, server_address, version }` : de quoi enrôler un host |
 
 Les requêtes suivantes portent `Authorization: Bearer <token>`. Les mots de passe sont hachés en Argon2id (12 caractères minimum) ; les jetons sont stockés hachés et révocables.
+
+**Double authentification (TOTP).** Une fois activée, `/auth/login` sans
+`totp_code` répond 401 `totp_required` ; un code faux répond 401
+`totp_invalid`. Codes à 6 chiffres sur 30 s (RFC 6238), compatibles avec les
+applications d'authentification courantes ; un code accepté ne peut pas être
+réutilisé. Un code de secours (`xxxx-xxxx`) remplace un code TOTP, une seule
+fois.
+
+**Limitation des tentatives.** Après 5 échecs en 15 minutes sur un compte, ou
+30 depuis une même adresse IP, `/auth/login` répond 429 avec `Retry-After`,
+même avec le bon mot de passe. Derrière un reverse proxy, lancez le serveur
+avec `--trust-forwarded-for` pour que l'adresse du client soit lue dans
+`X-Forwarded-For` (sans proxy, ne l'activez pas : un client pourrait changer
+d'adresse à volonté).
 
 ## Super-administrateur
 
@@ -28,6 +47,7 @@ Les requêtes suivantes portent `Authorization: Bearer <token>`. Les mots de pas
 | GET, POST | `/users` | lister, créer `{ email, display_name, password, superadmin? }` |
 | POST | `/entities` | créer `{ name, owner_email? }` ; le propriétaire reçoit le rôle `owner` |
 | DELETE | `/entities/{eid}` | supprimer une entité |
+| POST | `/users/{uid}/totp/reset` | désactiver la double authentification d'un compte (appareil perdu) et révoquer ses sessions |
 
 Le premier super-administrateur se crée en ligne de commande : `creamote-server user-add --superadmin`.
 

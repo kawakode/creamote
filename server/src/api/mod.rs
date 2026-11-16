@@ -9,6 +9,7 @@
 //! proxy TLS (Caddy, nginx…), ou laissez-la sur 127.0.0.1.
 
 mod account;
+mod book;
 mod console;
 mod device;
 mod entity;
@@ -21,7 +22,12 @@ use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
+use std::net::{IpAddr, SocketAddr};
+
+use axum::extract::ConnectInfo;
 use creamote_crypto::DeviceIdentity;
+
+use crate::limiter::{Limits, LoginLimiter};
 use serde::Serialize;
 use sqlx::Row;
 
@@ -41,6 +47,10 @@ pub struct Services {
     pub server_pin: String,
     /// Adresse `hôte:port` annoncée aux pairs, si configurée.
     pub server_address: Option<String>,
+    /// Faire confiance à `X-Forwarded-For` (API derrière un reverse proxy) pour
+    /// connaître l'adresse du client.
+    pub trust_forwarded_for: bool,
+    pub login_limits: Limits,
 }
 
 impl Services {
@@ -51,6 +61,8 @@ impl Services {
             online: Arc::new(|_: &[u8; 32]| false),
             server_pin: String::new(),
             server_address: None,
+            trust_forwarded_for: false,
+            login_limits: Limits::default(),
         }
     }
 }
@@ -63,6 +75,8 @@ pub struct AppState {
     pub online: Online,
     pub server_pin: String,
     pub server_address: Option<String>,
+    pub trust_forwarded_for: bool,
+    pub limiter: Arc<LoginLimiter>,
 }
 
 /// API (`/api/v1`) et console web d'administration (`/`).
@@ -71,6 +85,15 @@ pub fn router(db: Db, services: Services) -> Router {
         .route("/auth/login", post(account::login))
         .route("/auth/logout", post(account::logout))
         .route("/me", get(account::me))
+        .route("/me/totp/setup", post(account::totp_setup))
+        .route("/me/totp/enable", post(account::totp_enable))
+        .route("/me/totp/disable", post(account::totp_disable))
+        .route("/me/address-book", get(book::list).post(book::create))
+        .route(
+            "/me/address-book/{id}",
+            patch(book::update).delete(book::remove),
+        )
+        .route("/users/{uid}/totp/reset", post(account::totp_reset))
         .route(
             "/users",
             get(account::list_users).post(account::create_user),
@@ -150,6 +173,8 @@ pub fn router(db: Db, services: Services) -> Router {
         online: services.online,
         server_pin: services.server_pin,
         server_address: services.server_address,
+        trust_forwarded_for: services.trust_forwarded_for,
+        limiter: Arc::new(LoginLimiter::new(services.login_limits)),
     };
     Router::new()
         .nest(
@@ -189,6 +214,11 @@ async fn server_info(
 #[derive(Debug)]
 pub enum ApiError {
     Unauthorized,
+    /// Mot de passe correct, code de double authentification attendu.
+    TotpRequired,
+    TotpInvalid,
+    /// Trop de tentatives : réessayer après ce nombre de secondes.
+    TooManyRequests(u64),
     Forbidden,
     NotFound,
     BadRequest(String),
@@ -204,6 +234,32 @@ impl IntoResponse for ApiError {
                 "unauthorized",
                 "authentification requise".to_owned(),
             ),
+            ApiError::TotpRequired => (
+                StatusCode::UNAUTHORIZED,
+                "totp_required",
+                "code de double authentification requis".to_owned(),
+            ),
+            ApiError::TotpInvalid => (
+                StatusCode::UNAUTHORIZED,
+                "totp_invalid",
+                "code de double authentification invalide".to_owned(),
+            ),
+            ApiError::TooManyRequests(secs) => {
+                let minutes = secs.div_ceil(60).max(1);
+                let mut resp = (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(serde_json::json!({
+                        "error": "too_many_requests",
+                        "message": format!("trop de tentatives, réessayez dans {minutes} min"),
+                    })),
+                )
+                    .into_response();
+                resp.headers_mut().insert(
+                    axum::http::header::RETRY_AFTER,
+                    axum::http::HeaderValue::from(secs.max(1)),
+                );
+                return resp;
+            }
             ApiError::Forbidden => (
                 StatusCode::FORBIDDEN,
                 "forbidden",
@@ -242,6 +298,34 @@ impl From<sqlx::Error> for ApiError {
 }
 
 pub type ApiResult<T> = Result<T, ApiError>;
+
+/// Adresse IP du client : celle de la connexion, ou le premier élément de
+/// `X-Forwarded-For` si l'API est configurée derrière un reverse proxy.
+pub struct ClientIp(pub Option<IpAddr>);
+
+impl FromRequestParts<AppState> for ClientIp {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> ApiResult<Self> {
+        if state.trust_forwarded_for {
+            let forwarded = parts
+                .headers
+                .get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.split(',').next())
+                .and_then(|v| v.trim().parse().ok());
+            if forwarded.is_some() {
+                return Ok(ClientIp(forwarded));
+            }
+        }
+        Ok(ClientIp(
+            parts
+                .extensions
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|c| c.0.ip()),
+        ))
+    }
+}
 
 /// Utilisateur authentifié par son jeton.
 #[derive(Debug, Clone, Serialize)]
