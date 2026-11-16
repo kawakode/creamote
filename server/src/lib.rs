@@ -148,6 +148,7 @@ impl Server {
         };
         let endpoint = quinn::Endpoint::server(cert.quic_server_config()?, config.listen)?;
 
+        let server_address = config.relay_addr.clone();
         let permits = (config.policy.max_relay_sessions > 0)
             .then(|| Arc::new(Semaphore::new(config.policy.max_relay_sessions as usize)));
         let state = Arc::new(State {
@@ -169,7 +170,15 @@ impl Server {
                 let local = listener.local_addr()?;
                 let st = state.clone();
                 let online: api::Online = Arc::new(move |key: &[u8; 32]| st.is_online(key));
-                let app = api::router(db.clone(), ticket_key, online);
+                let app = api::router(
+                    db.clone(),
+                    api::Services {
+                        ticket_key,
+                        online,
+                        server_pin: pin.to_string(),
+                        server_address: server_address.clone(),
+                    },
+                );
                 let task = tokio::spawn(async move {
                     if let Err(e) = axum::serve(listener, app).await {
                         tracing::error!("API HTTP arrêtée : {e}");

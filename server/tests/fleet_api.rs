@@ -32,13 +32,10 @@ impl Api {
         let url = std::env::var("CREAMOTE_TEST_DATABASE_URL")
             .unwrap_or_else(|_| "sqlite::memory:".to_owned());
         let db = Db::connect(&url).await.unwrap();
-        let ticket_key = Arc::new(DeviceIdentity::generate());
+        let services = api::Services::ephemeral();
+        let ticket_key = services.ticket_key.clone();
         Self {
-            app: api::router(
-                db.clone(),
-                ticket_key.clone(),
-                Arc::new(|_: &[u8; 32]| false),
-            ),
+            app: api::router(db.clone(), services),
             db,
             ticket_key,
             tag: uuid::Uuid::new_v4().simple().to_string(),
@@ -856,4 +853,48 @@ async fn devices_and_tickets_follow_rbac() {
     ] {
         assert!(actions.iter().any(|x| x == a), "{a} absent de {actions:?}");
     }
+}
+
+#[tokio::test]
+async fn console_is_served_with_strict_headers() {
+    let api = Api::new().await;
+    for (path, ty) in [
+        ("/", "text/html"),
+        ("/app.js", "text/javascript"),
+        ("/app.css", "text/css"),
+        ("/icon.svg", "image/svg+xml"),
+    ] {
+        let req = Request::builder().uri(path).body(Body::empty()).unwrap();
+        let resp = api.app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "{path}");
+        let h = resp.headers();
+        assert!(
+            h["content-type"].to_str().unwrap().starts_with(ty),
+            "{path}"
+        );
+        let csp = h["content-security-policy"].to_str().unwrap();
+        assert!(csp.contains("default-src 'none'") && csp.contains("frame-ancestors 'none'"));
+        assert_eq!(h["x-content-type-options"], "nosniff");
+    }
+    // La page charge le script et la feuille de style de la même origine.
+    let req = Request::builder().uri("/").body(Body::empty()).unwrap();
+    let body = api.app.clone().oneshot(req).await.unwrap().into_body();
+    let html = String::from_utf8(body.collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    assert!(html.contains(r#"src="app.js""#) && html.contains(r#"href="app.css""#));
+    assert!(
+        !html.contains("http://") && !html.contains("https://"),
+        "aucune ressource externe"
+    );
+
+    // Informations d'enrôlement : authentification requise.
+    assert_eq!(
+        api.call(Method::GET, "/api/v1/server-info", None, None)
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (_, token) = api.user("alice", false).await;
+    let (s, info) = api.get("/api/v1/server-info", &token).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(info.get("server_pin").is_some() && info.get("version").is_some());
 }

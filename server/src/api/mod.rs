@@ -9,6 +9,7 @@
 //! proxy TLS (Caddy, nginx…), ou laissez-la sur 127.0.0.1.
 
 mod account;
+mod console;
 mod device;
 mod entity;
 
@@ -30,15 +31,42 @@ use crate::rbac::{self, FleetTree, Grant, Permissions, Target};
 /// Indique si la machine de clé publique donnée est connectée au rendezvous.
 pub type Online = Arc<dyn Fn(&[u8; 32]) -> bool + Send + Sync>;
 
+/// Ce que l'API sait du serveur QUIC qu'elle accompagne.
+#[derive(Clone)]
+pub struct Services {
+    /// Clé qui signe les tickets de session.
+    pub ticket_key: Arc<DeviceIdentity>,
+    pub online: Online,
+    /// Empreinte du certificat du rendezvous, à donner aux hosts.
+    pub server_pin: String,
+    /// Adresse `hôte:port` annoncée aux pairs, si configurée.
+    pub server_address: Option<String>,
+}
+
+impl Services {
+    /// Services de test : clé éphémère, aucune machine en ligne.
+    pub fn ephemeral() -> Self {
+        Self {
+            ticket_key: Arc::new(DeviceIdentity::generate()),
+            online: Arc::new(|_: &[u8; 32]| false),
+            server_pin: String::new(),
+            server_address: None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: Db,
     /// Clé qui signe les tickets de session.
     pub ticket_key: Arc<DeviceIdentity>,
     pub online: Online,
+    pub server_pin: String,
+    pub server_address: Option<String>,
 }
 
-pub fn router(db: Db, ticket_key: Arc<DeviceIdentity>, online: Online) -> Router {
+/// API (`/api/v1`) et console web d'administration (`/`).
+pub fn router(db: Db, services: Services) -> Router {
     let api = Router::new()
         .route("/auth/login", post(account::login))
         .route("/auth/logout", post(account::logout))
@@ -114,12 +142,47 @@ pub fn router(db: Db, ticket_key: Arc<DeviceIdentity>, online: Online) -> Router
                 .patch(device::update)
                 .delete(device::remove),
         )
-        .route("/tickets", post(device::issue_ticket));
-    Router::new().nest("/api/v1", api).with_state(AppState {
+        .route("/tickets", post(device::issue_ticket))
+        .route("/server-info", get(server_info));
+    let state = AppState {
         db,
-        ticket_key,
-        online,
-    })
+        ticket_key: services.ticket_key,
+        online: services.online,
+        server_pin: services.server_pin,
+        server_address: services.server_address,
+    };
+    Router::new()
+        .nest(
+            "/api/v1",
+            api.layer(axum::middleware::map_response(api_headers)),
+        )
+        .merge(console::router())
+        .with_state(state)
+}
+
+async fn api_headers(mut resp: Response) -> Response {
+    let h = resp.headers_mut();
+    h.insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    h.insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    resp
+}
+
+/// Informations publiques nécessaires pour enrôler un host.
+async fn server_info(
+    axum::extract::State(st): axum::extract::State<AppState>,
+    _user: CurrentUser,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "server_pin": st.server_pin,
+        "server_address": st.server_address,
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
 }
 
 /// Erreur d'API, rendue en JSON `{ "error": code, "message": texte }`.

@@ -2,6 +2,14 @@
 
 Base : `http://127.0.0.1:21401/api/v1` (à exposer derrière un reverse proxy TLS). Corps et réponses en JSON. Erreurs : `{ "error": "<code>", "message": "<texte>" }` avec les statuts 400, 401, 403, 404 et 409.
 
+La **console web d'administration** est servie par le même port, à la racine
+(`http://127.0.0.1:21401/`). C'est une application monopage sans dépendance,
+embarquée dans le binaire (`server/console/`), qui n'utilise que cette API.
+Elle est servie avec une politique de sécurité du contenu stricte (aucune
+ressource extérieure, pas de script en ligne, pas d'intégration en iframe) et
+garde le jeton d'API dans `sessionStorage` (effacé à la fermeture de
+l'onglet).
+
 ## Authentification
 
 | Méthode | Chemin | Rôle |
@@ -9,6 +17,7 @@ Base : `http://127.0.0.1:21401/api/v1` (à exposer derrière un reverse proxy TL
 | POST | `/auth/login` | `{ email, password }` → `{ token, expires_at }` (jeton valable 12 h) |
 | POST | `/auth/logout` | révoque le jeton courant |
 | GET | `/me` | profil et entités, avec les permissions au niveau entité |
+| GET | `/server-info` | `{ server_pin, server_address, version }` : de quoi enrôler un host |
 
 Les requêtes suivantes portent `Authorization: Bearer <token>`. Les mots de passe sont hachés en Argon2id (12 caractères minimum) ; les jetons sont stockés hachés et révocables.
 
