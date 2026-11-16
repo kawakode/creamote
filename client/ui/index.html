@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Creamote</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="main.js"></script>
+</head>
+<body>
+  <main id="home">
+    <header>
+      <h1>Creamote</h1>
+      <p class="me">Cet appareil : <strong id="my-id">…</strong> <span class="muted" id="my-fp"></span></p>
+    </header>
+    <form id="connect-form" autocomplete="off">
+      <label>ID de la machine
+        <input id="target" required placeholder="123 456 789" inputmode="numeric">
+      </label>
+      <fieldset>
+        <legend>Serveur</legend>
+        <label>Adresse <input id="server" required placeholder="relay.example.org:21400"></label>
+        <label>Empreinte <input id="server-pin" required placeholder="empreinte affichée par creamote-server"></label>
+      </fieldset>
+      <details>
+        <summary>Machine enrôlée dans un parc</summary>
+        <label>URL de l'API <input id="api-url" placeholder="https://creamote.example.org"></label>
+        <label>Jeton d'API <input id="api-token" type="password"></label>
+      </details>
+      <label class="check"><input id="view-only" type="checkbox"> Vue seule (sans contrôle)</label>
+      <button type="submit" id="connect-btn">Se connecter</button>
+      <p id="status" role="status"></p>
+    </form>
+  </main>
+
+  <section id="session" hidden>
+    <div id="toolbar">
+      <span id="peer"></span>
+      <span class="muted">Code <strong id="code"></strong></span>
+      <span class="muted" id="stats"></span>
+      <select id="displays" title="Écran"></select>
+      <button id="disconnect" type="button">Déconnecter</button>
+    </div>
+    <div id="viewport">
+      <canvas id="screen" tabindex="0"></canvas>
+      <p id="waiting">En attente de l'accord de l'utilisateur distant…</p>
+    </div>
+  </section>
+</body>
+</html>
