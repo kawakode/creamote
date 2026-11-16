@@ -36,6 +36,7 @@ impl Env {
             api_listen: Some("127.0.0.1:0".parse().unwrap()),
             trust_forwarded_for: false,
             oidc: None,
+            public_url: None,
         })
         .await
         .unwrap();
@@ -281,6 +282,7 @@ async fn enrollment_unavailable_without_fleet_management() {
         api_listen: None,
         trust_forwarded_for: false,
         oidc: None,
+        public_url: None,
     })
     .await
     .unwrap();

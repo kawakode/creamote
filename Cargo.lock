@@ -590,6 +590,7 @@ dependencies = [
  "creamote-crypto",
  "creamote-net",
  "creamote-proto",
+ "ed25519-dalek 2.2.0",
  "hmac 0.12.1",
  "http-body-util",
  "jsonwebtoken",

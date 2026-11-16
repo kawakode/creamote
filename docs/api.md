@@ -20,6 +20,10 @@ l'onglet).
 | POST | `/me/totp/setup` | `{ password }` → `{ secret, otpauth_uri, qr_svg }` : prépare la double authentification |
 | POST | `/me/totp/enable` | `{ code }` → `{ recovery_codes }` (10 codes, montrés une seule fois) |
 | POST | `/me/totp/disable` | `{ password, code }` (code TOTP ou de secours) |
+| GET | `/me/webauthn` | clés de sécurité : `[{ id, name, created_at, last_used_at }]` |
+| POST | `/me/webauthn/register` | `{ password }` → `{ challenge_id, public_key }` : options de `navigator.credentials.create()` (binaire en base64url) |
+| POST | `/me/webauthn` | `{ challenge_id, name, credential: { id, client_data_json, attestation_object } }` → `{ id, recovery_codes }` (codes si c'est le premier second facteur, sinon `null`) |
+| POST | `/me/webauthn/{id}/delete` | `{ password }` : retire une clé |
 | GET, POST | `/me/address-book` | carnet d'adresses personnel ; créer `{ label, device_id, notes? }` |
 | PATCH, DELETE | `/me/address-book/{id}` | `{ label?, device_id?, notes? }` |
 | GET | `/server-info` | `{ server_pin, server_address, version }` : de quoi enrôler un host |
@@ -30,8 +34,30 @@ Les requêtes suivantes portent `Authorization: Bearer <token>`. Les mots de pas
 `totp_code` répond 401 `totp_required` ; un code faux répond 401
 `totp_invalid`. Codes à 6 chiffres sur 30 s (RFC 6238), compatibles avec les
 applications d'authentification courantes ; un code accepté ne peut pas être
-réutilisé. Un code de secours (`xxxx-xxxx`) remplace un code TOTP, une seule
-fois.
+réutilisé. Un code de secours (`xxxx-xxxx`) remplace un code TOTP ou une clé
+de sécurité, une seule fois.
+
+**Clés de sécurité (WebAuthn).** Clés USB/NFC, Windows Hello, Touch ID ou
+passkeys de téléphone, comme second facteur (avec ou à la place du TOTP).
+Quand le compte a des clés, `/auth/login` avec le bon mot de passe répond 401
+`{ "error": "totp_required", "totp": <bool>, "webauthn": { challenge_id,
+public_key } }` ; la console fait signer `public_key` par
+`navigator.credentials.get()`, puis :
+
+| Méthode | Chemin | Rôle |
+| --- | --- | --- |
+| POST | `/auth/webauthn/login` | `{ challenge_id, credential: { id, client_data_json, authenticator_data, signature, user_handle? } }` → `{ token, expires_at }` ; 401 `totp_invalid` si la clé est refusée |
+
+Les clés sont liées au domaine de la console : `--public-url
+https://admin.example.org` (HTTPS obligatoire, pas d'adresse IP). Sans cette
+option, elles ne fonctionnent que si l'API écoute sur une adresse locale et
+que la console est ouverte sur `http://localhost:<port>/`. Algorithmes : ES256,
+EdDSA, RS256 (2048 bits minimum). Contrôles : défi aléatoire à usage unique
+(5 min), origine exacte, empreinte du domaine, présence de l'utilisateur,
+signature, compteur de signatures croissant (clé clonée). L'attestation du
+modèle de clé n'est pas vérifiée. La première clé (sans TOTP actif) donne 10
+codes de secours ; ils disparaissent quand plus aucun second facteur n'est
+actif.
 
 **Connexion SSO (OpenID Connect).** Avec `--oidc-issuer`, `--oidc-client-id`,
 `--public-url` (et le secret dans `CREAMOTE_OIDC_CLIENT_SECRET`), la console
@@ -40,7 +66,7 @@ fournisseur l'URL de retour `<public-url>/api/v1/auth/oidc/callback`.
 
 | Méthode | Chemin | Rôle |
 | --- | --- | --- |
-| GET | `/auth/methods` | méthodes proposées : `{ password, oidc: { name } \| null }` |
+| GET | `/auth/methods` | méthodes proposées : `{ password, oidc: { name } \| null, webauthn: { rp_id } \| null }` |
 | GET | `/auth/oidc/start` | redirige vers le fournisseur |
 | GET | `/auth/oidc/callback` | retour du fournisseur ; redirige vers la console (`/#/oidc/<code>` ou `/#/oidc-error/<raison>`) |
 | POST | `/auth/oidc/exchange` | `{ code }` → `{ token, expires_at }` ; code à usage unique, valable 60 s |
@@ -70,7 +96,7 @@ d'adresse à volonté).
 | GET, POST | `/users` | lister, créer `{ email, display_name, password, superadmin? }` |
 | POST | `/entities` | créer `{ name, owner_email? }` ; le propriétaire reçoit le rôle `owner` |
 | DELETE | `/entities/{eid}` | supprimer une entité |
-| POST | `/users/{uid}/totp/reset` | désactiver la double authentification d'un compte (appareil perdu) et révoquer ses sessions |
+| POST | `/users/{uid}/totp/reset` | désactiver la double authentification d'un compte (appareil ou clé perdus) : TOTP, clés de sécurité et codes de secours ; révoque ses sessions |
 
 Le premier super-administrateur se crée en ligne de commande : `creamote-server user-add --superadmin`.
 

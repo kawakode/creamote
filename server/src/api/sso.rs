@@ -27,6 +27,8 @@ pub async fn methods(State(st): State<AppState>) -> Json<serde_json::Value> {
     Json(json!({
         "password": true,
         "oidc": st.oidc.as_ref().map(|o| json!({ "name": o.config().display_name })),
+        // Domaine auquel sont liées les clés de sécurité.
+        "webauthn": st.webauthn.as_ref().map(|w| json!({ "rp_id": w.rp().id })),
     }))
 }
 

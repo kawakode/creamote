@@ -46,15 +46,19 @@ pub async fn open_session(st: &AppState, user_id: &str) -> ApiResult<(String, i6
 }
 
 /// Compte et secret TOTP, pour la connexion et les opérations sensibles.
-struct Credentials {
-    id: String,
+pub(super) struct Credentials {
+    pub(super) id: String,
     password_hash: String,
     totp_secret: Option<String>,
-    totp_enabled: bool,
+    pub(super) totp_enabled: bool,
     totp_last_step: i64,
 }
 
-async fn credentials(st: &AppState, where_: &str, key: &str) -> ApiResult<Option<Credentials>> {
+pub(super) async fn credentials(
+    st: &AppState,
+    where_: &str,
+    key: &str,
+) -> ApiResult<Option<Credentials>> {
     let row = sqlx::query(&format!(
         "SELECT id, password_hash, totp_secret, totp_enabled, totp_last_step FROM users \
          WHERE {where_} = $1 AND disabled = 0"
@@ -73,10 +77,9 @@ async fn credentials(st: &AppState, where_: &str, key: &str) -> ApiResult<Option
 
 /// Vérifie un code TOTP (sans rejeu) ou consomme un code de secours.
 async fn check_second_factor(st: &AppState, c: &Credentials, code: &str) -> ApiResult<bool> {
-    let Some(secret) = &c.totp_secret else {
-        return Ok(false);
-    };
-    if let Some(step) = totp::verify(secret, code, now(), c.totp_last_step) {
+    if let Some(secret) = c.totp_secret.as_deref().filter(|_| c.totp_enabled)
+        && let Some(step) = totp::verify(secret, code, now(), c.totp_last_step)
+    {
         // Conditionnel : deux requêtes simultanées avec le même code ne
         // passent pas toutes les deux.
         let done = sqlx::query(
@@ -148,9 +151,23 @@ pub async fn login(
         fail("password").await?;
         return Err(ApiError::Unauthorized);
     };
-    if c.totp_enabled {
+    let keys = key_ids(&st, &c.id).await?;
+    if c.totp_enabled || !keys.is_empty() {
         match req.totp_code.as_deref().map(str::trim) {
-            None | Some("") => return Err(ApiError::TotpRequired),
+            None | Some("") => {
+                // Mot de passe correct : défi WebAuthn pour les clés du compte.
+                let webauthn = match (&st.webauthn, keys.is_empty()) {
+                    (Some(w), false) => Some(w.start_login(&c.id, &keys).map_err(|e| {
+                        tracing::warn!("WebAuthn : {e}");
+                        ApiError::TooManyRequests(60)
+                    })?),
+                    _ => None,
+                };
+                return Err(ApiError::TotpRequired {
+                    totp: c.totp_enabled,
+                    webauthn,
+                });
+            }
             Some(code) => {
                 if !check_second_factor(&st, &c, code).await? {
                     fail("totp").await?;
@@ -176,9 +193,22 @@ pub async fn login(
 
 // ------------------------------------------------- double authentification
 
+/// Identifiants (base64url) des clés de sécurité du compte.
+pub(super) async fn key_ids(st: &AppState, user_id: &str) -> ApiResult<Vec<String>> {
+    Ok(sqlx::query(
+        "SELECT credential_id FROM webauthn_credentials WHERE user_id = $1 ORDER BY created_at",
+    )
+    .bind(user_id)
+    .fetch_all(st.db.pool())
+    .await?
+    .into_iter()
+    .map(|r| r.get("credential_id"))
+    .collect())
+}
+
 /// Revérifie le mot de passe de l'utilisateur connecté (opération sensible),
 /// avec la même limitation que la connexion.
-async fn confirm_password(
+pub(super) async fn confirm_password(
     st: &AppState,
     user: &CurrentUser,
     ip: Option<std::net::IpAddr>,
@@ -268,7 +298,7 @@ pub async fn totp_enable(
     Ok(Json(json!({ "recovery_codes": codes })))
 }
 
-async fn replace_recovery_codes(st: &AppState, user_id: &str) -> ApiResult<Vec<String>> {
+pub(super) async fn replace_recovery_codes(st: &AppState, user_id: &str) -> ApiResult<Vec<String>> {
     sqlx::query("DELETE FROM recovery_codes WHERE user_id = $1")
         .bind(user_id)
         .execute(st.db.pool())
@@ -291,10 +321,21 @@ async fn clear_totp(st: &AppState, user_id: &str) -> ApiResult<()> {
     .bind(user_id)
     .execute(st.db.pool())
     .await?;
-    sqlx::query("DELETE FROM recovery_codes WHERE user_id = $1")
-        .bind(user_id)
-        .execute(st.db.pool())
-        .await?;
+    drop_recovery_codes_if_unused(st, user_id).await
+}
+
+/// Supprime les codes de secours quand plus aucun second facteur n'est actif.
+pub(super) async fn drop_recovery_codes_if_unused(st: &AppState, user_id: &str) -> ApiResult<()> {
+    sqlx::query(
+        "DELETE FROM recovery_codes WHERE user_id = $1 \
+         AND NOT EXISTS (SELECT 1 FROM users WHERE id = $2 AND totp_enabled = 1) \
+         AND NOT EXISTS (SELECT 1 FROM webauthn_credentials WHERE user_id = $3)",
+    )
+    .bind(user_id)
+    .bind(user_id)
+    .bind(user_id)
+    .execute(st.db.pool())
+    .await?;
     Ok(())
 }
 
@@ -327,7 +368,8 @@ pub async fn totp_disable(
 }
 
 /// Super-admin : désactive la double authentification d'un compte (appareil
-/// perdu sans codes de secours). Les sessions du compte sont révoquées.
+/// ou clé perdus sans codes de secours) : TOTP, clés de sécurité et codes de
+/// secours. Les sessions du compte sont révoquées.
 pub async fn totp_reset(
     State(st): State<AppState>,
     user: CurrentUser,
@@ -339,6 +381,10 @@ pub async fn totp_reset(
         .fetch_optional(st.db.pool())
         .await?;
     exists.ok_or(ApiError::NotFound)?;
+    sqlx::query("DELETE FROM webauthn_credentials WHERE user_id = $1")
+        .bind(&uid)
+        .execute(st.db.pool())
+        .await?;
     clear_totp(&st, &uid).await?;
     sqlx::query("DELETE FROM api_sessions WHERE user_id = $1")
         .bind(&uid)
@@ -369,6 +415,8 @@ pub struct Me {
     user: CurrentUser,
     entities: Vec<MyEntity>,
     totp_enabled: bool,
+    /// Clés de sécurité WebAuthn enregistrées.
+    webauthn_keys: i64,
     /// Codes de secours encore utilisables.
     recovery_codes_left: i64,
 }
@@ -410,10 +458,12 @@ pub async fn me(State(st): State<AppState>, user: CurrentUser) -> ApiResult<Json
     .fetch_one(st.db.pool())
     .await?
     .get::<i64, _>("n");
+    let webauthn_keys = key_ids(&st, &user.id).await?.len() as i64;
     Ok(Json(Me {
         user,
         entities,
         totp_enabled,
+        webauthn_keys,
         recovery_codes_left,
     }))
 }
@@ -428,6 +478,8 @@ pub struct UserOut {
     totp_enabled: bool,
     /// Compte lié à une identité OIDC.
     sso_linked: bool,
+    /// Clés de sécurité WebAuthn enregistrées.
+    webauthn_keys: i64,
 }
 
 pub async fn list_users(
@@ -436,7 +488,9 @@ pub async fn list_users(
 ) -> ApiResult<Json<Vec<UserOut>>> {
     require_superadmin(&user)?;
     let rows = sqlx::query(
-        "SELECT id, email, display_name, is_superadmin, disabled, totp_enabled, oidc_subject FROM users ORDER BY email",
+        "SELECT id, email, display_name, is_superadmin, disabled, totp_enabled, oidc_subject, \
+         (SELECT COUNT(*) FROM webauthn_credentials w WHERE w.user_id = users.id) AS webauthn_keys \
+         FROM users ORDER BY email",
     )
     .fetch_all(st.db.pool())
     .await?;
@@ -450,6 +504,7 @@ pub async fn list_users(
                 disabled: r.get::<i64, _>("disabled") != 0,
                 totp_enabled: r.get::<i64, _>("totp_enabled") != 0,
                 sso_linked: r.get::<Option<String>, _>("oidc_subject").is_some(),
+                webauthn_keys: r.get("webauthn_keys"),
             })
             .collect(),
     ))

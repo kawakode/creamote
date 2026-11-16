@@ -13,6 +13,7 @@ mod book;
 mod console;
 mod device;
 mod entity;
+mod keys;
 mod sso;
 
 use std::sync::Arc;
@@ -54,6 +55,8 @@ pub struct Services {
     pub login_limits: Limits,
     /// Connexion OpenID Connect, si configurée.
     pub oidc: Option<Arc<crate::oidc::Oidc>>,
+    /// Clés de sécurité WebAuthn, si le domaine de la console est connu.
+    pub webauthn: Option<Arc<crate::webauthn::WebAuthn>>,
 }
 
 impl Services {
@@ -67,6 +70,7 @@ impl Services {
             trust_forwarded_for: false,
             login_limits: Limits::default(),
             oidc: None,
+            webauthn: None,
         }
     }
 }
@@ -82,6 +86,7 @@ pub struct AppState {
     pub trust_forwarded_for: bool,
     pub limiter: Arc<LoginLimiter>,
     pub oidc: Option<Arc<crate::oidc::Oidc>>,
+    pub webauthn: Option<Arc<crate::webauthn::WebAuthn>>,
 }
 
 /// API (`/api/v1`) et console web d'administration (`/`).
@@ -93,10 +98,14 @@ pub fn router(db: Db, services: Services) -> Router {
         .route("/auth/oidc/start", get(sso::start))
         .route("/auth/oidc/callback", get(sso::callback))
         .route("/auth/oidc/exchange", post(sso::exchange))
+        .route("/auth/webauthn/login", post(keys::login))
         .route("/me", get(account::me))
         .route("/me/totp/setup", post(account::totp_setup))
         .route("/me/totp/enable", post(account::totp_enable))
         .route("/me/totp/disable", post(account::totp_disable))
+        .route("/me/webauthn", get(keys::list).post(keys::register_finish))
+        .route("/me/webauthn/register", post(keys::register_start))
+        .route("/me/webauthn/{id}/delete", post(keys::remove))
         .route("/me/address-book", get(book::list).post(book::create))
         .route(
             "/me/address-book/{id}",
@@ -185,6 +194,7 @@ pub fn router(db: Db, services: Services) -> Router {
         trust_forwarded_for: services.trust_forwarded_for,
         limiter: Arc::new(LoginLimiter::new(services.login_limits)),
         oidc: services.oidc,
+        webauthn: services.webauthn,
     };
     Router::new()
         .nest(
@@ -224,8 +234,12 @@ async fn server_info(
 #[derive(Debug)]
 pub enum ApiError {
     Unauthorized,
-    /// Mot de passe correct, code de double authentification attendu.
-    TotpRequired,
+    /// Mot de passe correct, second facteur attendu : code TOTP (ou de
+    /// secours) et/ou clé de sécurité, avec le défi WebAuthn à signer.
+    TotpRequired {
+        totp: bool,
+        webauthn: Option<serde_json::Value>,
+    },
     TotpInvalid,
     /// Trop de tentatives : réessayer après ce nombre de secondes.
     TooManyRequests(u64),
@@ -244,11 +258,18 @@ impl IntoResponse for ApiError {
                 "unauthorized",
                 "authentification requise".to_owned(),
             ),
-            ApiError::TotpRequired => (
-                StatusCode::UNAUTHORIZED,
-                "totp_required",
-                "code de double authentification requis".to_owned(),
-            ),
+            ApiError::TotpRequired { totp, webauthn } => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({
+                        "error": "totp_required",
+                        "message": "double authentification requise",
+                        "totp": totp,
+                        "webauthn": webauthn,
+                    })),
+                )
+                    .into_response();
+            }
             ApiError::TotpInvalid => (
                 StatusCode::UNAUTHORIZED,
                 "totp_invalid",
