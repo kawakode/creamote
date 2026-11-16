@@ -1,6 +1,7 @@
 // Interface du client Creamote. Aucune dépendance : API Tauri globale
 // (withGlobalTauri) et WebCodecs quand la WebView le propose.
 import { HID_USAGE } from "./keymap.js";
+import { TransferList } from "./transfers.js";
 
 const { invoke, Channel } = window.__TAURI__.core;
 const $ = (id) => document.getElementById(id);
@@ -12,6 +13,12 @@ const store = {
 };
 
 let session = null;
+
+const transfers = new TransferList($("transfers"), $("transfer-list"), {
+  accept: (id) => invoke("accept_file", { id }),
+  reject: (id) => invoke("reject_file", { id }),
+  cancel: (id, direction) => invoke("cancel_file", { id, direction }),
+});
 
 async function webCodecsAvailable() {
   if (typeof VideoDecoder === "undefined") return false;
@@ -33,6 +40,8 @@ async function init() {
     const v = store.get(`creamote.${f}`);
     if (v) $(f).value = v;
   }
+  // Presse-papier partagé : activé sauf si l'utilisateur l'a désactivé.
+  $("share-clipboard").checked = store.get("creamote.share-clipboard") !== "0";
   try {
     const me = await invoke("identity");
     $("my-id").textContent = me.device_id;
@@ -47,11 +56,49 @@ async function init() {
   $("disconnect").addEventListener("click", () => invoke("disconnect").finally(() => end("Session fermée.")));
   $("displays").addEventListener("change", (ev) =>
     invoke("select_display", { displayId: Number(ev.target.value) }).catch(console.error));
+  setupSharing();
   setupInput();
+}
+
+// ----- Presse-papier et fichiers -----
+
+function setClipboardButton(on) {
+  const b = $("clipboard");
+  b.setAttribute("aria-pressed", String(on));
+  b.textContent = on ? "Presse-papier partagé" : "Presse-papier suspendu";
+}
+
+function setupSharing() {
+  $("clipboard").addEventListener("click", () => {
+    const on = $("clipboard").getAttribute("aria-pressed") !== "true";
+    invoke("set_clipboard", { enabled: on })
+      .then(() => {
+        setClipboardButton(on);
+        store.set("creamote.share-clipboard", on ? "1" : "0");
+        $("share-clipboard").checked = on;
+      })
+      .catch(console.error);
+    $("screen").focus();
+  });
+  const pick = (folder) => () =>
+    invoke("pick_and_send", { folder })
+      .catch((e) => transfers.handle({ event: "error", name: "", reason: String(e) }))
+      .finally(() => $("screen").focus());
+  $("send-files").addEventListener("click", pick(false));
+  $("send-folder").addEventListener("click", pick(true));
+  $("open-downloads").addEventListener("click", () => invoke("open_downloads").catch(console.error));
+  $("clear-transfers").addEventListener("click", () => transfers.clearFinished());
+}
+
+function resetSharing() {
+  for (const id of ["clipboard", "send-files", "send-folder"]) $(id).hidden = true;
+  $("drop").hidden = true;
+  transfers.reset();
 }
 
 async function connect() {
   for (const f of FIELDS) store.set(`creamote.${f}`, $(f).value);
+  store.set("creamote.share-clipboard", $("share-clipboard").checked ? "1" : "0");
   const useWebCodecs = await webCodecsAvailable();
   session = new Session(useWebCodecs);
   const events = new Channel();
@@ -71,10 +118,12 @@ async function connect() {
         apiToken: $("api-token").value || null,
         viewOnly: $("view-only").checked,
         decodeInRust: !useWebCodecs,
+        clipboard: $("share-clipboard").checked,
       },
       events,
       frames,
     });
+    resetSharing();
     $("home").hidden = true;
     $("session").hidden = false;
     $("waiting").hidden = false;
@@ -91,6 +140,7 @@ async function connect() {
 function end(message, error = false) {
   if (session) session.close();
   session = null;
+  resetSharing();
   $("session").hidden = true;
   $("home").hidden = false;
   setStatus(message, error);
@@ -136,6 +186,21 @@ class Session {
         this.control = ev.granted.includes("control");
         this.showDisplays(ev.displays, (d) => d.primary);
         $("peer").textContent += this.control ? " · contrôle" : " · vue seule";
+        // Presse-papier : seulement si le host l'accorde.
+        $("clipboard").hidden = !ev.granted.includes("clipboard");
+        setClipboardButton($("share-clipboard").checked);
+        break;
+      case "files":
+        // Transfert de fichiers accordé par le host.
+        $("send-files").hidden = false;
+        $("send-folder").hidden = false;
+        $("open-downloads").title = ev.folder;
+        break;
+      case "transfer":
+        transfers.handle(ev);
+        break;
+      case "drag":
+        $("drop").hidden = !ev.over;
         break;
       case "displays":
         // Écran branché ou débranché chez le host.
