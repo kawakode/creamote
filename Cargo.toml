@@ -30,9 +30,9 @@ creamote-crypto = { path = "crates/creamote-crypto" }
 creamote-net = { path = "crates/creamote-net" }
 creamote-transfer = { path = "crates/creamote-transfer" }
 creamote-server = { path = "server" }
-creamote-capture = { path = "crates/creamote-capture" }
+creamote-capture = { path = "crates/creamote-capture", default-features = false }
 creamote-codec = { path = "crates/creamote-codec" }
-creamote-input = { path = "crates/creamote-input" }
+creamote-input = { path = "crates/creamote-input", default-features = false }
 creamote-session = { path = "crates/creamote-session" }
 prost = "0.14"
 prost-build = "0.14"
@@ -73,6 +73,8 @@ clipboard-win = "5"
 png = "0.18"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 # Médias (M2) : API natives des OS, openh264 en repli logiciel.
+pipewire = "0.10"
+zbus = { version = "5", default-features = false, features = ["blocking-api", "async-io"] }
 x11rb = { version = "0.14", features = ["randr", "shm", "xfixes", "xtest"] }
 openh264 = "0.9"
 windows = "0.62"

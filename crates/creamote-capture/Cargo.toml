@@ -1,6 +1,6 @@
 [package]
 name = "creamote-capture"
-description = "Capture d'écran Creamote par les API natives (DXGI, ScreenCaptureKit, X11)"
+description = "Capture d'écran Creamote par les API natives (DXGI, ScreenCaptureKit, X11, portail Wayland + PipeWire)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,6 +14,13 @@ tracing.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb.workspace = true
 libc.workspace = true
+pipewire = { workspace = true, optional = true }
+zbus = { workspace = true, optional = true }
+
+[features]
+default = []
+# Wayland : portail xdg-desktop-portal (D-Bus) et PipeWire (libpipewire-0.3).
+wayland = ["dep:pipewire", "dep:zbus"]
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true, features = [

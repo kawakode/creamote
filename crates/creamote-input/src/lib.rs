@@ -18,6 +18,8 @@ use creamote_capture::DisplayInfo;
 mod keymap;
 #[cfg(target_os = "macos")]
 mod mac;
+#[cfg(all(target_os = "linux", feature = "wayland"))]
+mod portal;
 #[cfg(windows)]
 mod win;
 #[cfg(target_os = "linux")]
@@ -106,7 +108,13 @@ pub struct Injector {
 impl Injector {
     /// Ouvre l'injection pour l'écran capturé `display`.
     pub fn open(display: DisplayInfo) -> Result<Self> {
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", feature = "wayland"))]
+        let backend: Box<dyn Backend> = if creamote_capture::wayland::active() {
+            Box::new(portal::Portal::open(&display)?)
+        } else {
+            Box::new(xtest::XTest::open()?)
+        };
+        #[cfg(all(target_os = "linux", not(feature = "wayland")))]
         let backend: Box<dyn Backend> = Box::new(xtest::XTest::open()?);
         #[cfg(windows)]
         let backend: Box<dyn Backend> = Box::new(win::SendInput::open());
