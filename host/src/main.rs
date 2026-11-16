@@ -15,11 +15,15 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
+mod config;
 mod consent;
+mod service;
 
 use anyhow::Context;
-use clap::Parser;
+use clap::{Parser, Subcommand};
+use config::HostConfig;
 use creamote_codec::Preference;
 use creamote_crypto::{DeviceIdentity, PublicIdentity, store};
 use creamote_net::ident;
@@ -37,24 +41,26 @@ use creamote_session::{FilesConfig, Sharing};
 #[derive(Parser)]
 #[command(version, about = "Host Creamote")]
 struct Args {
-    /// Fichier de l'identité de l'appareil (créé s'il n'existe pas).
-    #[arg(long, default_value = "creamote-host.identity")]
-    identity_file: PathBuf,
+    /// Fichier de l'identité de l'appareil (créé s'il n'existe pas). Par
+    /// défaut `creamote-host.identity`, ou le dossier de la plateforme avec
+    /// `--service`.
+    #[arg(long)]
+    identity_file: Option<PathBuf>,
     /// Fichier d'enrôlement (créé par `--enroll`).
-    #[arg(long, default_value = "creamote-host.enrollment")]
-    enrollment_file: PathBuf,
-    /// Serveur Creamote, `hôte:port`. Par défaut, celui de l'enrôlement ;
-    /// sans serveur ni enrôlement, affiche seulement l'ID.
+    #[arg(long)]
+    enrollment_file: Option<PathBuf>,
+    /// Serveur Creamote, `hôte:port`. Par défaut, celui de la configuration
+    /// ou de l'enrôlement ; sans serveur, affiche seulement l'ID.
     #[arg(long, requires = "server_pin")]
     server: Option<String>,
     /// Empreinte du serveur (affichée au démarrage de creamote-server).
     #[arg(long)]
     server_pin: Option<ServerPin>,
     /// Enrôle ce host dans un parc avec un jeton créé par un administrateur.
-    #[arg(long, requires = "server")]
+    #[arg(long)]
     enroll: Option<String>,
-    /// Nom affiché de la machine à l'enrôlement (par défaut, son ID).
-    #[arg(long, requires = "enroll")]
+    /// Nom affiché de la machine à l'enrôlement (par défaut, son nom réseau).
+    #[arg(long)]
     name: Option<String>,
     /// Encodeur vidéo : `auto` (matériel si possible) ou `software`.
     #[arg(long, default_value = "auto")]
@@ -78,36 +84,188 @@ struct Args {
     /// de l'utilisateur).
     #[arg(long)]
     files_dir: Option<PathBuf>,
+    /// Fichier de configuration (`clé = valeur`). Par défaut, avec
+    /// `--service`, le fichier système (`/etc/creamote/host.conf`,
+    /// `/Library/Application Support/Creamote/host.conf`,
+    /// `%ProgramData%\Creamote\host.conf`).
+    #[arg(long)]
+    config: Option<PathBuf>,
+    /// Mode service : configuration système, données dans le dossier de la
+    /// plateforme, reconnexion automatique au serveur. C'est ainsi que le
+    /// lance le service installé.
+    #[arg(long)]
+    service: bool,
+    #[command(subcommand)]
+    command: Option<Command>,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+#[derive(Subcommand)]
+enum Command {
+    /// Service lancé au démarrage (droits administrateur requis).
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServiceAction {
+    /// Installe et démarre le service.
+    Install,
+    /// Arrête et supprime le service.
+    Uninstall,
+    /// Point d'entrée du service Windows (lancé par le système).
+    #[command(hide = true)]
+    Run,
+}
+
+/// Réglages résolus : ligne de commande, puis fichier de configuration, puis
+/// valeurs par défaut.
+struct Settings {
+    identity_file: PathBuf,
+    enrollment_file: PathBuf,
+    server: Option<(String, Option<ServerPin>)>,
+    enroll_token: Option<String>,
+    /// Le jeton vient de la ligne de commande : un host déjà enrôlé est une
+    /// erreur (avec la configuration, le jeton est simplement déjà utilisé).
+    enroll_explicit: bool,
+    name: Option<String>,
+    encoder: Preference,
+    unattended_dev: bool,
+    relay_only: bool,
+    clipboard: bool,
+    files_dir: Option<PathBuf>,
+    service: bool,
+}
+
+impl Settings {
+    fn resolve(args: Args) -> anyhow::Result<Self> {
+        let config_file = args
+            .config
+            .clone()
+            .or_else(|| args.service.then(config::system_config_file));
+        let cfg = match &config_file {
+            Some(path) => HostConfig::load(path)?,
+            None => HostConfig::default(),
+        };
+        let data = args.service.then(config::state_dir);
+        if let Some(dir) = &data {
+            std::fs::create_dir_all(dir).with_context(|| dir.display().to_string())?;
+        }
+        let in_data = |name: &str, default: &str| match &data {
+            Some(dir) => dir.join(name),
+            None => PathBuf::from(default),
+        };
+        let pin = match (args.server_pin, &cfg.server_pin) {
+            (Some(p), _) => Some(p),
+            (None, Some(p)) => Some(p.parse().context("server_pin de la configuration")?),
+            (None, None) => None,
+        };
+        let server = args.server.or(cfg.server).map(|s| (s, pin));
+        let files = !args.no_files && cfg.file_transfer.unwrap_or(true);
+        let files_dir = args.files_dir.or(cfg.files_dir);
+        Ok(Self {
+            identity_file: args
+                .identity_file
+                .unwrap_or_else(|| in_data("identity", "creamote-host.identity")),
+            enrollment_file: args
+                .enrollment_file
+                .unwrap_or_else(|| in_data("enrollment", "creamote-host.enrollment")),
+            server,
+            enroll_explicit: args.enroll.is_some(),
+            enroll_token: args.enroll.or(cfg.enroll_token),
+            name: args.name.or(cfg.name).or_else(config::hostname),
+            encoder: args.encoder,
+            unattended_dev: args.unattended_dev,
+            relay_only: args.relay_only || cfg.relay_only.unwrap_or(false),
+            clipboard: !args.no_clipboard && cfg.clipboard.unwrap_or(true),
+            files_dir: files.then(|| files_dir.unwrap_or_else(|| default_files_dir(args.service))),
+            service: args.service,
+        })
+    }
+}
+
+fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+    if let Some(Command::Service { action }) = &args.command {
+        return match action {
+            ServiceAction::Install => service::install(),
+            ServiceAction::Uninstall => service::uninstall(),
+            #[cfg(windows)]
+            ServiceAction::Run => service::windows::run_dispatcher(),
+            #[cfg(not(windows))]
+            ServiceAction::Run => anyhow::bail!("réservé au service Windows"),
+        };
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
-    let args = Args::parse();
+    let settings = Settings::resolve(args)?;
+    tokio::runtime::Runtime::new()?.block_on(run(settings))
+}
+
+/// Délais entre deux tentatives de connexion en mode service.
+const RETRY_MIN: Duration = Duration::from_secs(2);
+const RETRY_MAX: Duration = Duration::from_secs(60);
+
+async fn run(settings: Settings) -> anyhow::Result<()> {
     creamote_capture::init();
 
-    let (identity, created) = store::load_or_create(&args.identity_file)
-        .with_context(|| format!("identité {}", args.identity_file.display()))?;
+    let (identity, created) = store::load_or_create(&settings.identity_file)
+        .with_context(|| format!("identité {}", settings.identity_file.display()))?;
     let state = if created { "créée" } else { "chargée" };
-    println!("Identité {state} : {}", args.identity_file.display());
+    println!("Identité {state} : {}", settings.identity_file.display());
     println!("ID de l'appareil : {}", identity.device_id());
     println!("Empreinte        : {}", identity.public().fingerprint());
+    let identity = Arc::new(identity);
 
-    let mut enrollment = Enrollment::load(&args.enrollment_file)
-        .with_context(|| format!("enrôlement {}", args.enrollment_file.display()))?;
-    let (server, pin) = match (args.server, args.server_pin, &enrollment) {
-        (Some(s), Some(p), _) => (s, p),
-        (None, _, Some(e)) => (
+    if !settings.service {
+        return connect_and_serve(&settings, &identity).await;
+    }
+    // Mode service : on ne s'arrête jamais, le serveur peut redémarrer ou le
+    // réseau disparaître.
+    let mut delay = RETRY_MIN;
+    loop {
+        let started = Instant::now();
+        match connect_and_serve(&settings, &identity).await {
+            Ok(()) => println!("Serveur déconnecté."),
+            Err(e) => eprintln!("Connexion au serveur : {e:#}"),
+        }
+        if started.elapsed() > RETRY_MAX {
+            delay = RETRY_MIN;
+        }
+        println!("Nouvelle tentative dans {} s.", delay.as_secs());
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(RETRY_MAX);
+    }
+}
+
+async fn connect_and_serve(
+    settings: &Settings,
+    identity: &Arc<DeviceIdentity>,
+) -> anyhow::Result<()> {
+    let mut enrollment = Enrollment::load(&settings.enrollment_file)
+        .with_context(|| format!("enrôlement {}", settings.enrollment_file.display()))?;
+    let (server, pin) = match (&settings.server, &enrollment) {
+        (Some((s, Some(p))), _) => (s.clone(), *p),
+        (Some((_, None)), _) => {
+            anyhow::bail!("empreinte du serveur manquante (--server-pin ou server_pin)")
+        }
+        (None, Some(e)) => (
             e.server.clone(),
             e.server_pin
                 .parse()
                 .context("empreinte du fichier d'enrôlement")?,
         ),
-        _ => return Ok(()),
+        (None, None) if settings.service => {
+            anyhow::bail!(
+                "aucun serveur configuré ({})",
+                config::system_config_file().display()
+            )
+        }
+        (None, None) => return Ok(()),
     };
     let addr = tokio::net::lookup_host(&server)
         .await?
@@ -115,34 +273,39 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("adresse introuvable : {server}"))?;
     let options = RegisterOptions {
         accept_direct: true,
-        relay_only: args.relay_only,
+        relay_only: settings.relay_only,
     };
-    let mut rv = RendezvousClient::register_with(addr, pin, &identity, options).await?;
+    let mut rv = RendezvousClient::register_with(addr, pin, identity, options).await?;
 
-    if let Some(token) = args.enroll {
-        anyhow::ensure!(
-            enrollment.is_none(),
+    match (&settings.enroll_token, &enrollment) {
+        (Some(_), Some(_)) if settings.enroll_explicit => anyhow::bail!(
             "ce host est déjà enrôlé ({}) : supprimez ce fichier pour le réenrôler",
-            args.enrollment_file.display()
-        );
-        let name = args
-            .name
-            .unwrap_or_else(|| identity.device_id().to_string());
-        let r = rv.enroll(&token, &name).await.context("enrôlement")?;
-        let e = Enrollment {
-            ticket_key: r
-                .ticket_public_key
-                .as_slice()
-                .try_into()
-                .context("clé de tickets invalide")?,
-            server: server.clone(),
-            server_pin: pin.to_string(),
-            entity_name: r.entity_name,
-            fleet_name: r.fleet_name,
-        };
-        e.save(&args.enrollment_file)?;
-        enrollment = Some(e);
-    } else if let Some(e) = &enrollment {
+            settings.enrollment_file.display()
+        ),
+        (Some(token), None) => {
+            let name = settings
+                .name
+                .clone()
+                .unwrap_or_else(|| identity.device_id().to_string());
+            let r = rv.enroll(token, &name).await.context("enrôlement")?;
+            let e = Enrollment {
+                ticket_key: r
+                    .ticket_public_key
+                    .as_slice()
+                    .try_into()
+                    .context("clé de tickets invalide")?,
+                server: server.clone(),
+                server_pin: pin.to_string(),
+                entity_name: r.entity_name,
+                fleet_name: r.fleet_name,
+            };
+            e.save(&settings.enrollment_file)?;
+            println!("Enrôlé sous le nom « {name} ».");
+            enrollment = Some(e);
+        }
+        _ => {}
+    }
+    if let Some(e) = &enrollment {
         anyhow::ensure!(
             e.server_pin == pin.to_string(),
             "ce host est enrôlé auprès d'un autre serveur ({})",
@@ -150,7 +313,7 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     anyhow::ensure!(
-        !(args.unattended_dev && enrollment.is_some()),
+        !(settings.unattended_dev && enrollment.is_some()),
         "--unattended-dev est réservé aux hosts non enrôlés"
     );
     match &enrollment {
@@ -158,7 +321,7 @@ async fn main() -> anyhow::Result<()> {
             "Enrôlé dans « {} » / parc « {} » : sessions sur ticket uniquement.",
             e.entity_name, e.fleet_name
         ),
-        None if args.unattended_dev => {
+        None if settings.unattended_dev => {
             println!("Non enrôlé, --unattended-dev : toute demande est acceptée SANS consentement.")
         }
         None => println!("Non enrôlé : chaque demande est soumise à l'utilisateur présent."),
@@ -176,13 +339,13 @@ async fn main() -> anyhow::Result<()> {
         println!("Débit du relay limité : {} kbit/s", bps / 900);
     }
     let ctx = Ctx {
-        identity: Arc::new(identity),
+        identity: identity.clone(),
         relay_bitrate_cap,
         enrollment,
-        media: Media::native(args.encoder),
-        unattended_dev: args.unattended_dev,
-        clipboard: !args.no_clipboard,
-        files_dir: (!args.no_files).then(|| args.files_dir.unwrap_or_else(default_files_dir)),
+        media: Media::native(settings.encoder),
+        unattended_dev: settings.unattended_dev,
+        clipboard: settings.clipboard,
+        files_dir: settings.files_dir.clone(),
     };
     serve(rv, addr, ctx).await
 }
@@ -225,7 +388,15 @@ impl Ctx {
 }
 
 /// `Téléchargements/Creamote` (ou `Downloads/Creamote`) de l'utilisateur.
-fn default_files_dir() -> PathBuf {
+/// Le service Windows tourne sous SYSTEM : il dépose les fichiers dans les
+/// téléchargements publics (`C:\Users\Public\Downloads\Creamote`).
+fn default_files_dir(service: bool) -> PathBuf {
+    if cfg!(windows)
+        && service
+        && let Some(public) = std::env::var_os("PUBLIC")
+    {
+        return PathBuf::from(public).join("Downloads").join("Creamote");
+    }
     let home = std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)
