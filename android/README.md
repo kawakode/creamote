@@ -1,6 +1,6 @@
 # App Android Creamote (Kotlin)
 
-App Android native (client et host). Choix d'architecture : [ADR 0004](../docs/adr/0004-android.md).
+App Android native (client et host). Choix d'architecture : [ADR 0005](../docs/adr/0005-android.md).
 
 | Module | Contenu |
 | --- | --- |

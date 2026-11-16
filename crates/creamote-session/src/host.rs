@@ -14,7 +14,7 @@ use pb::session_message::Kind;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 
-use crate::rate::RateController;
+use crate::rate::{MIN_BITRATE, RateController};
 use crate::sharing::{Active, Sharing};
 use crate::{
     DEFAULT_FPS, EndReason, MAX_FRAMES_IN_FLIGHT, Result, SessionError, chunks, from_proto,
@@ -130,6 +130,9 @@ pub struct Media {
     /// Source déjà encodée : remplace `capturer` et `encoder` quand elle est
     /// fournie.
     pub encoded: Option<Arc<EncodedSourceFn>>,
+    /// Plafond du débit vidéo en bit/s, 0 = aucun (ex. : plafond du relay
+    /// public quand la session passe par lui).
+    pub max_bitrate_bps: u32,
 }
 
 impl Media {
@@ -145,6 +148,7 @@ impl Media {
             }),
             encoder,
             encoded: None,
+            max_bitrate_bps: 0,
         }
     }
 
@@ -164,6 +168,7 @@ impl Media {
             injector,
             encoder: Preference::Auto,
             encoded: Some(source),
+            max_bitrate_bps: 0,
         }
     }
 }
@@ -441,7 +446,14 @@ impl Stream {
                 .name("creamote-video".into())
                 .spawn(move || {
                     let r = match &media.encoded {
-                        Some(open) => encoded_loop(&req, open.as_ref(), &ctl, &out, display_tx),
+                        Some(open) => encoded_loop(
+                            &req,
+                            open.as_ref(),
+                            media.max_bitrate_bps,
+                            &ctl,
+                            &out,
+                            display_tx,
+                        ),
                         None => video_loop(&req, &media, &ctl, &out, display_tx),
                     };
                     if let Err(msg) = r {
@@ -515,14 +527,20 @@ fn requested_fps(req: &pb::VideoConfig) -> u32 {
 fn encoded_loop(
     req: &pb::VideoConfig,
     open: &EncodedSourceFn,
+    max_bitrate_bps: u32,
     ctl: &StreamCtl,
     out: &mpsc::Sender<Kind>,
     display_tx: std_mpsc::Sender<DisplayInfo>,
 ) -> Result<(), String> {
     let fps = requested_fps(req);
+    let cap = match max_bitrate_bps {
+        0 => u32::MAX,
+        m => m.max(MIN_BITRATE),
+    };
     let bitrate_bps = match req.target_bitrate_bps {
-        0 => 0,
-        b => b.clamp(200_000, 50_000_000),
+        0 if cap == u32::MAX => 0,
+        0 => cap,
+        b => b.clamp(200_000, 50_000_000).min(cap),
     };
     let request = |display_id| SourceRequest {
         display_id,
@@ -533,9 +551,12 @@ fn encoded_loop(
     let mut src = open(request(Some(req.display_id))).or_else(|_| open(request(None)))?;
     let display = src.display();
     let _ = display_tx.send(display.clone());
+    if src.bitrate() > cap {
+        src.set_bitrate(cap);
+    }
     let start = Instant::now();
     let mut config: Option<pb::VideoConfig> = None;
-    let mut rate = RateController::new(src.bitrate(), start);
+    let mut rate = RateController::new(src.bitrate().min(cap), start);
     let mut sent: u64 = 0;
     src.request_keyframe();
 
@@ -673,6 +694,9 @@ fn video_loop(
             let mut cfg = EncoderConfig::for_size(w, h, fps);
             if req.target_bitrate_bps > 0 {
                 cfg.bitrate_bps = req.target_bitrate_bps.clamp(200_000, 50_000_000);
+            }
+            if media.max_bitrate_bps > 0 {
+                cfg.bitrate_bps = cfg.bitrate_bps.min(media.max_bitrate_bps.max(MIN_BITRATE));
             }
             let e = creamote_codec::open_h264(cfg, media.encoder).map_err(|e| e.to_string())?;
             let config = pb::VideoConfig {

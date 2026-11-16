@@ -40,4 +40,31 @@ docker compose -f deploy/docker-compose.yml run --rm -T creamote-server user-add
 
 Connectez-vous ensuite à la console avec ce compte. Voir [docs/api.md](../docs/api.md) pour l'API.
 
-Options utiles : `--relay-addr` (adresse publique annoncée pour le relay), `--public` (mode serveur officiel : une session relay à la fois par IP, 10 min par session, 200 sessions au total), `--max-relay-sessions`, `--max-relay-sessions-per-ip`, `--max-relay-seconds`.
+Options utiles : `--relay-addr` (adresse publique annoncée pour le relay), `--metrics-listen 127.0.0.1:21402` (métriques Prometheus sur `/metrics`), `--max-relay-sessions`, `--max-relay-sessions-per-ip`, `--max-relay-seconds`, `--max-relay-kbps` (limites du relay, illimitées par défaut sur un serveur auto-hébergé).
+
+Serveur public (`--public`, sans gestion de parc, avec limites par IP) : voir [official/README.md](official/README.md).
+
+## Host installé comme service
+
+Sur les machines à contrôler sans surveillance, installez le host comme service (droits administrateur) :
+
+```sh
+creamote-host service install     # Windows : service CreamoteHost ; macOS : agent launchd ; Linux : service utilisateur systemd
+creamote-host service uninstall
+```
+
+Il lit sa configuration dans `/etc/creamote/host.conf` (Linux), `/Library/Application Support/Creamote/host.conf` (macOS) ou `%ProgramData%\Creamote\host.conf` (Windows) :
+
+```text
+server = relay.example.org:21400
+server_pin = <empreinte du serveur>
+# Jeton d'enrôlement : le host rejoint le parc à son premier démarrage.
+enroll_token = <jeton créé dans la console>
+# Facultatif :
+# name = Poste accueil       (par défaut : nom de la machine)
+# relay_only = false
+# clipboard = true
+# file_transfer = true
+```
+
+Le service se reconnecte seul si le serveur redémarre. Fonctionnement et limites par système : [ADR 0004](../docs/adr/0004-host-service.md).

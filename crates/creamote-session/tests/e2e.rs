@@ -71,6 +71,7 @@ fn media(log: Log) -> Media {
         injector: Arc::new(move |_| Ok(Box::new(Spy(log.clone())) as Box<dyn InputSink>)),
         encoder: Preference::Software,
         encoded: None,
+        max_bitrate_bps: 0,
     }
 }
 
@@ -462,6 +463,7 @@ async fn display_changes_are_announced_and_capture_falls_back_to_primary() {
             injector: Arc::new(|_| Ok(Box::new(Spy(Log::default())) as Box<dyn InputSink>)),
             encoder: Preference::Software,
             encoded: None,
+            max_bitrate_bps: 0,
         }
     };
     let (a, b) = tokio::io::duplex(1 << 20);

@@ -20,7 +20,7 @@ Milestone **M1 : rendezvous et relay**. Voir [docs/architecture.md](docs/archite
 - `crates/creamote-crypto` : identité d'appareil (Ed25519 + clé Noise X25519 liée), ID à 9 chiffres, empreinte, handshake Noise XX authentifié et canal chiffré.
 - `crates/creamote-net` : QUIC avec certificat de serveur épinglé, client de rendezvous, connexion directe entre pairs (LAN, hole punching UDP) avec repli sur le relay, canal chiffré de bout en bout.
 - `crates/creamote-transfer` : presse-papier partagé (API natives de chaque OS) et transfert de fichiers dans la session chiffrée.
-- `server/` : rendezvous + relay, mode public avec limites (voir [deploy/](deploy/README.md)), et gestion de parc : comptes, entités, parcs, groupes de sécurité, RBAC et audit, via une [API HTTP](docs/api.md) et une console web d'administration intégrée, sur SQLite ou PostgreSQL ; enrôlement des machines et tickets de session signés.
+- `server/` : rendezvous + relay, mode public pour le serveur officiel avec limites par IP, plafond de débit et métriques (voir [deploy/official](deploy/official/README.md)), et gestion de parc : comptes, entités, parcs, groupes de sécurité, RBAC et audit, via une [API HTTP](docs/api.md) et une console web d'administration intégrée, sur SQLite ou PostgreSQL ; enrôlement des machines et tickets de session signés.
 - `crates/creamote-capture` : capture d'écran native (DXGI Desktop Duplication, ScreenCaptureKit, X11 MIT-SHM, portail Wayland + PipeWire).
 - `crates/creamote-codec` : encodage H.264 par les encodeurs matériels natifs (Media Foundation, VideoToolbox), openh264 en repli.
 - `crates/creamote-input` : injection clavier/souris native (SendInput, CGEvent, XTest), touches physiques USB HID.

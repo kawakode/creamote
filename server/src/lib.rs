@@ -9,7 +9,9 @@
 //!   les interpréter (ils sont chiffrés de bout en bout par Noise).
 //!
 //! En mode public (serveur officiel), la [`Policy`] limite le nombre de
-//! sessions relay simultanées et leur durée.
+//! sessions relay simultanées, leur durée et leur débit, ainsi que les
+//! connexions, enregistrements et demandes de session par adresse IP
+//! ([`ratelimit`]). Les compteurs sont exposés par [`metrics`].
 //!
 //! La gestion de parc (comptes, entités, parcs, RBAC) est exposée par une API
 //! HTTP ([`api`]) adossée à la base de données ([`db`]).
@@ -18,7 +20,9 @@ pub mod api;
 pub mod auth;
 pub mod db;
 pub mod limiter;
+pub mod metrics;
 pub mod oidc;
+pub mod ratelimit;
 pub mod rbac;
 pub mod totp;
 pub mod webauthn;
@@ -28,7 +32,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use creamote_crypto::{DeviceId, DeviceIdentity, PublicIdentity};
 use creamote_net::tls::{ServerCert, ServerPin};
@@ -40,13 +44,15 @@ use creamote_proto::rendezvous::v1::{
 };
 use quinn::{RecvStream, SendStream};
 use rand_core::{OsRng, RngCore};
-use tokio::io::Join;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::JoinHandle;
 
+use metrics::Metrics;
+use ratelimit::{IpCounts, IpGuard};
+
 type SessionId = [u8; 16];
 type Token = [u8; 32];
-type Pipe = Join<RecvStream, SendStream>;
+type Pipe = (RecvStream, SendStream);
 
 /// Délai pour envoyer le premier message d'un flux.
 const FIRST_MESSAGE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -65,8 +71,17 @@ pub struct Policy {
     pub max_relay_sessions_per_ip: u32,
     /// Durée maximale d'une session relay, 0 = illimitée.
     pub max_relay_seconds: u32,
+    /// Débit maximal d'une session relay, par sens, en bit/s, 0 = illimité.
+    pub max_relay_bitrate_bps: u64,
     /// Délai laissé aux deux pairs pour rejoindre le relay.
     pub relay_join_timeout: Duration,
+    /// Connexions QUIC simultanées par adresse IP (/64 en IPv6), 0 = illimité.
+    pub max_connections_per_ip: u32,
+    /// Enregistrements de pairs par adresse IP et par minute, 0 = illimité.
+    pub registrations_per_ip_per_minute: u32,
+    /// Demandes de session par adresse IP et par minute, 0 = illimité.
+    /// Empêche aussi de balayer les ID pour trouver ceux qui sont en ligne.
+    pub connect_requests_per_ip_per_minute: u32,
 }
 
 impl Policy {
@@ -77,19 +92,29 @@ impl Policy {
             max_relay_sessions: 0,
             max_relay_sessions_per_ip: 0,
             max_relay_seconds: 0,
+            max_relay_bitrate_bps: 0,
             relay_join_timeout: Duration::from_secs(30),
+            max_connections_per_ip: 0,
+            registrations_per_ip_per_minute: 0,
+            connect_requests_per_ip_per_minute: 0,
         }
     }
 
     /// Serveur officiel : une session relay à la fois par IP, 10 minutes
-    /// maximum, 200 sessions au total. Valeurs ajustables.
+    /// maximum, 5 Mbit/s par sens, 200 sessions au total ; 32 connexions,
+    /// 20 enregistrements et 30 demandes de session par minute et par IP.
+    /// Valeurs ajustables.
     pub fn public() -> Self {
         Self {
             public_mode: true,
             max_relay_sessions: 200,
             max_relay_sessions_per_ip: 1,
             max_relay_seconds: 10 * 60,
+            max_relay_bitrate_bps: 5_000_000,
             relay_join_timeout: Duration::from_secs(30),
+            max_connections_per_ip: 32,
+            registrations_per_ip_per_minute: 20,
+            connect_requests_per_ip_per_minute: 30,
         }
     }
 
@@ -98,7 +123,7 @@ impl Policy {
             public_mode: self.public_mode,
             max_concurrent_relay_sessions: self.max_relay_sessions,
             max_relay_session_seconds: self.max_relay_seconds,
-            max_relay_bitrate_bps: 0,
+            max_relay_bitrate_bps: self.max_relay_bitrate_bps,
             max_relay_sessions_per_ip: self.max_relay_sessions_per_ip,
         }
     }
@@ -136,6 +161,7 @@ pub struct Server {
     task: JoinHandle<()>,
     api: Option<(SocketAddr, JoinHandle<()>)>,
     db: Option<db::Db>,
+    state: Arc<State>,
 }
 
 impl Server {
@@ -165,8 +191,19 @@ impl Server {
         let server_address = config.relay_addr.clone();
         let permits = (config.policy.max_relay_sessions > 0)
             .then(|| Arc::new(Semaphore::new(config.policy.max_relay_sessions as usize)));
+        let minute = Duration::from_secs(60);
         let state = Arc::new(State {
             relay_addr: config.relay_addr.unwrap_or_default(),
+            registrations: ratelimit::WindowLimiter::new(
+                config.policy.registrations_per_ip_per_minute,
+                minute,
+            ),
+            requests: ratelimit::WindowLimiter::new(
+                config.policy.connect_requests_per_ip_per_minute,
+                minute,
+            ),
+            connections: ratelimit::IpCounts::default(),
+            metrics: metrics::Metrics::default(),
             policy: config.policy,
             permits,
             db: db.clone(),
@@ -174,7 +211,7 @@ impl Server {
             peers: Mutex::default(),
             pending: Mutex::default(),
             relays: Mutex::default(),
-            ip_sessions: Arc::default(),
+            ip_sessions: IpCounts::default(),
             next_conn: AtomicU64::new(1),
         });
 
@@ -230,13 +267,25 @@ impl Server {
         };
 
         let ep = endpoint.clone();
+        let st = state.clone();
         let task = tokio::spawn(async move {
             while let Some(incoming) = ep.accept().await {
-                let state = state.clone();
+                let ip = incoming.remote_address().ip();
+                let max = st.policy.max_connections_per_ip;
+                let Ok(guard) = st.connections.acquire(ip, max) else {
+                    Metrics::inc(&st.metrics.connections_refused_total);
+                    incoming.refuse();
+                    continue;
+                };
+                let state = st.clone();
+                Metrics::inc(&st.metrics.connections_total);
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(state, incoming).await {
+                    Metrics::inc(&state.metrics.connections_active);
+                    if let Err(e) = handle_connection(state.clone(), incoming).await {
                         tracing::debug!("connexion terminée : {e}");
                     }
+                    Metrics::dec(&state.metrics.connections_active);
+                    drop(guard);
                 });
             }
         });
@@ -246,6 +295,7 @@ impl Server {
             task,
             api,
             db,
+            state,
         })
     }
 
@@ -256,6 +306,21 @@ impl Server {
 
     pub fn db(&self) -> Option<&db::Db> {
         self.db.as_ref()
+    }
+
+    /// Compteurs au format texte de Prometheus.
+    pub fn metrics_text(&self) -> String {
+        let peers = self.state.peers.lock().expect("verrou sain").len();
+        self.state.metrics.render(peers)
+    }
+
+    /// Fonction qui produit les compteurs, à servir sur HTTP.
+    pub fn metrics_source(&self) -> Arc<dyn Fn() -> String + Send + Sync> {
+        let state = self.state.clone();
+        Arc::new(move || {
+            let peers = state.peers.lock().expect("verrou sain").len();
+            state.metrics.render(peers)
+        })
     }
 
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
@@ -306,38 +371,13 @@ struct RelaySlot {
 struct Quota {
     _global: Option<OwnedSemaphorePermit>,
     _ip: Option<IpGuard>,
+    metrics: Option<Arc<State>>,
 }
 
-type IpCounts = Arc<Mutex<HashMap<IpAddr, u32>>>;
-
-struct IpGuard {
-    counts: IpCounts,
-    ip: IpAddr,
-}
-
-impl IpGuard {
-    fn acquire(counts: &IpCounts, ip: IpAddr, max: u32) -> Option<Self> {
-        let mut map = counts.lock().expect("verrou sain");
-        let n = map.entry(ip).or_insert(0);
-        if *n >= max {
-            return None;
-        }
-        *n += 1;
-        Some(Self {
-            counts: counts.clone(),
-            ip,
-        })
-    }
-}
-
-impl Drop for IpGuard {
+impl Drop for Quota {
     fn drop(&mut self) {
-        let mut map = self.counts.lock().expect("verrou sain");
-        if let Some(n) = map.get_mut(&self.ip) {
-            *n -= 1;
-            if *n == 0 {
-                map.remove(&self.ip);
-            }
+        if let Some(st) = &self.metrics {
+            Metrics::dec(&st.metrics.relay_sessions_active);
         }
     }
 }
@@ -353,6 +393,10 @@ struct State {
     relays: Mutex<HashMap<SessionId, RelaySlot>>,
     ip_sessions: IpCounts,
     next_conn: AtomicU64,
+    connections: IpCounts,
+    registrations: ratelimit::WindowLimiter,
+    requests: ratelimit::WindowLimiter,
+    metrics: Metrics,
 }
 
 impl State {
@@ -432,6 +476,12 @@ async fn control_stream(
         policy: Some(state.policy.to_proto()),
     };
 
+    if !state.registrations.allow(conn.remote_address().ip()) {
+        Metrics::inc(&state.metrics.registrations_rate_limited_total);
+        let r = respond(RegisterStatus::RateLimited, String::new());
+        frame::write_msg(&mut send, &msg(Kind::RegisterPeerResponse(r))).await?;
+        return Ok(());
+    }
     let identity = reg
         .identity
         .as_ref()
@@ -472,6 +522,7 @@ async fn control_stream(
         return Ok(());
     }
     tracing::info!(%device_id, addr = %conn.remote_address(), "pair enregistré");
+    Metrics::inc(&state.metrics.registrations_total);
 
     let r = respond(RegisterStatus::Ok, device_id.to_string());
     frame::write_msg(&mut send, &msg(Kind::RegisterPeerResponse(r))).await?;
@@ -621,6 +672,11 @@ fn handle_request(
     viewer_tx: &mpsc::Sender<RendezvousMessage>,
     req: ConnectRequest,
 ) {
+    Metrics::inc(&state.metrics.connect_requests_total);
+    if !state.requests.allow(conn.remote_address().ip()) {
+        Metrics::inc(&state.metrics.connect_requests_rate_limited_total);
+        return reject(viewer_tx, req.request_id, RejectReason::RateLimited);
+    }
     let Some(target) = DeviceId::parse(&req.target_device_id) else {
         return reject(viewer_tx, req.request_id, RejectReason::InvalidRequest);
     };
@@ -628,7 +684,10 @@ fn handle_request(
         let peers = state.peers.lock().expect("verrou sain");
         match peers.get(&target) {
             Some(p) => p.tx.clone(),
-            None => return reject(viewer_tx, req.request_id, RejectReason::TargetOffline),
+            None => {
+                Metrics::inc(&state.metrics.sessions_target_offline_total);
+                return reject(viewer_tx, req.request_id, RejectReason::TargetOffline);
+            }
         }
     };
 
@@ -684,6 +743,7 @@ fn handle_answer(
     let Some(p) = pending else { return };
 
     if !ans.accepted {
+        Metrics::inc(&state.metrics.sessions_declined_total);
         return reject(&p.viewer_tx, p.request_id, RejectReason::Declined);
     }
     // Connexion directe possible si aucun des deux pairs n'est relay_only.
@@ -726,6 +786,7 @@ fn handle_answer(
         // Relay indisponible : la session peut encore aboutir en direct, qui
         // ne coûte rien au serveur.
         Err(reason) if direct => {
+            Metrics::inc(&state.metrics.sessions_direct_only_total);
             let _ = p
                 .viewer_tx
                 .try_send(grant(None, p.request_id, viewer_peer, reason));
@@ -761,21 +822,18 @@ fn handle_answer(
 
 /// Réserve une place sur le relay (quota par IP, puis global).
 fn relay_quota(state: &State, p: &Pending) -> Result<Quota, RejectReason> {
-    let ip = match state.policy.max_relay_sessions_per_ip {
-        0 => None,
-        max => match IpGuard::acquire(&state.ip_sessions, p.viewer_ip, max) {
-            Some(guard) => Some(guard),
-            None => {
-                tracing::info!(ip = %p.viewer_ip, "quota de sessions relay atteint pour cette IP");
-                return Err(RejectReason::QuotaExceeded);
-            }
-        },
+    let max = state.policy.max_relay_sessions_per_ip;
+    let Ok(ip) = state.ip_sessions.acquire(p.viewer_ip, max) else {
+        tracing::info!(ip = %p.viewer_ip, "quota de sessions relay atteint pour cette IP");
+        Metrics::inc(&state.metrics.relay_quota_exceeded_total);
+        return Err(RejectReason::QuotaExceeded);
     };
     let global = match &state.permits {
         Some(sem) => match sem.clone().try_acquire_owned() {
             Ok(permit) => Some(permit),
             Err(_) => {
                 tracing::warn!("relay plein");
+                Metrics::inc(&state.metrics.relay_full_total);
                 return Err(RejectReason::RelayFull);
             }
         },
@@ -784,6 +842,7 @@ fn relay_quota(state: &State, p: &Pending) -> Result<Quota, RejectReason> {
     Ok(Quota {
         _global: global,
         _ip: ip,
+        metrics: None,
     })
 }
 
@@ -791,7 +850,7 @@ fn relay_join(state: Arc<State>, send: SendStream, recv: RecvStream, join: Relay
     let Ok(session_id) = SessionId::try_from(join.session_id.as_slice()) else {
         return;
     };
-    let pipe = tokio::io::join(recv, send);
+    let pipe = (recv, send);
     let paired = {
         let mut relays = state.relays.lock().expect("verrou sain");
         let Some(slot) = relays.get_mut(&session_id) else {
@@ -806,7 +865,8 @@ fn relay_join(state: Arc<State>, send: SendStream, recv: RecvStream, join: Relay
         };
         match slot.waiting.take() {
             Some((other_side, other)) if other_side != side => {
-                let slot = relays.remove(&session_id).expect("présent");
+                let mut slot = relays.remove(&session_id).expect("présent");
+                slot.quota.metrics = Some(state.clone());
                 Some((other, pipe, slot.quota))
             }
             Some(first) => {
@@ -821,25 +881,34 @@ fn relay_join(state: Arc<State>, send: SendStream, recv: RecvStream, join: Relay
         }
     };
     if let Some((a, b, quota)) = paired {
-        let max = state.policy.max_relay_seconds;
-        tokio::spawn(pump(a, b, quota, max));
+        Metrics::inc(&state.metrics.relay_sessions_total);
+        Metrics::inc(&state.metrics.relay_sessions_active);
+        tokio::spawn(pump(state, a, b, quota));
     }
 }
 
-async fn pump(mut a: Pipe, mut b: Pipe, quota: Quota, max_secs: u32) {
+async fn pump(state: Arc<State>, a: Pipe, b: Pipe, quota: Quota) {
     tracing::info!("session relay ouverte");
-    let copy = tokio::io::copy_bidirectional(&mut a, &mut b);
-    let outcome = if max_secs > 0 {
-        match tokio::time::timeout(Duration::from_secs(max_secs.into()), copy).await {
+    let bps = state.policy.max_relay_bitrate_bps;
+    let (a_recv, a_send) = a;
+    let (b_recv, b_send) = b;
+    let copy = async {
+        tokio::try_join!(
+            copy_limited(a_recv, b_send, bps, &state.metrics),
+            copy_limited(b_recv, a_send, bps, &state.metrics),
+        )
+    };
+    let outcome = match state.policy.max_relay_seconds {
+        0 => copy.await,
+        max => match tokio::time::timeout(Duration::from_secs(max.into()), copy).await {
             Ok(r) => r,
             Err(_) => {
                 tracing::info!("session relay coupée : durée maximale atteinte");
+                Metrics::inc(&state.metrics.relay_sessions_expired_total);
                 drop(quota);
                 return;
             }
-        }
-    } else {
-        copy.await
+        },
     };
     match outcome {
         Ok((ab, ba)) => tracing::info!(
@@ -850,4 +919,94 @@ async fn pump(mut a: Pipe, mut b: Pipe, quota: Quota, max_secs: u32) {
         Err(e) => tracing::info!("session relay interrompue : {e}"),
     }
     drop(quota);
+}
+
+/// Taille des lectures du relay.
+const RELAY_CHUNK: usize = 32 * 1024;
+
+/// Recopie un sens d'une session relay, au plus `bps` bit/s (0 = sans
+/// limite). Les octets en attente restent dans le tampon de réception QUIC
+/// de la source : le contrôle de flux ralentit l'émetteur, dont le débit
+/// adaptatif (M3) voit monter la file d'attente et baisse le débit vidéo.
+async fn copy_limited(
+    mut from: RecvStream,
+    mut to: SendStream,
+    bps: u64,
+    metrics: &Metrics,
+) -> std::io::Result<u64> {
+    let mut bucket = (bps > 0).then(|| TokenBucket::new(bps / 8));
+    let mut buf = vec![0u8; RELAY_CHUNK];
+    let mut total = 0u64;
+    while let Some(n) = from.read(&mut buf).await.map_err(std::io::Error::other)? {
+        if let Some(b) = bucket.as_mut() {
+            b.take(n as u64).await;
+        }
+        to.write_all(&buf[..n])
+            .await
+            .map_err(std::io::Error::other)?;
+        total += n as u64;
+        metrics
+            .relay_bytes_total
+            .fetch_add(n as u64, Ordering::Relaxed);
+    }
+    let _ = to.finish();
+    Ok(total)
+}
+
+/// Seau à jetons : `rate` octets par seconde, avec une rafale de 250 ms.
+struct TokenBucket {
+    rate: u64,
+    /// Instant où le seau sera de nouveau à zéro (dans le passé = plein).
+    debt_until: Instant,
+}
+
+impl TokenBucket {
+    const BURST: Duration = Duration::from_millis(250);
+
+    fn new(rate: u64) -> Self {
+        Self {
+            rate: rate.max(1),
+            debt_until: Instant::now(),
+        }
+    }
+
+    /// Délai à attendre avant d'envoyer `n` octets reçus à `now`.
+    fn reserve(&mut self, n: u64, now: Instant) -> Duration {
+        let cost = Duration::from_secs_f64(n as f64 / self.rate as f64);
+        let start = self
+            .debt_until
+            .max(now.checked_sub(Self::BURST).unwrap_or(now));
+        self.debt_until = start + cost;
+        self.debt_until
+            .saturating_duration_since(now)
+            .saturating_sub(Self::BURST)
+    }
+
+    async fn take(&mut self, n: u64) {
+        let wait = self.reserve(n, Instant::now());
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_bucket_allows_burst_then_paces() {
+        let t0 = Instant::now() + Duration::from_secs(10);
+        let mut b = TokenBucket {
+            rate: 1000,
+            debt_until: t0,
+        };
+        // Rafale de 250 ms (250 octets) sans attente.
+        assert_eq!(b.reserve(250, t0), Duration::ZERO);
+        // Au-delà, 1 ms par octet.
+        assert_eq!(b.reserve(100, t0), Duration::from_millis(100));
+        // Une seconde plus tard, la dette est remboursée.
+        let t1 = t0 + Duration::from_secs(2);
+        assert_eq!(b.reserve(200, t1), Duration::ZERO);
+    }
 }

@@ -1,0 +1,29 @@
+# Règles d'alerte Prometheus pour le serveur officiel
+# (métriques de `--metrics-listen`).
+groups:
+  - name: creamote
+    rules:
+      - alert: CreamoteDown
+        expr: up{job="creamote"} == 0
+        for: 2m
+        annotations:
+          summary: "Serveur Creamote injoignable"
+      - alert: CreamoteRelayFull
+        # Des sessions relay sont refusées faute de place : augmenter
+        # --max-relay-sessions ou ajouter un serveur.
+        expr: increase(creamote_relay_full_total[10m]) > 0
+        annotations:
+          summary: "Relay plein : sessions refusées"
+      - alert: CreamoteRegistrationFlood
+        # Beaucoup d'enregistrements refusés : abus ou très gros NAT (CGNAT).
+        expr: rate(creamote_registrations_rate_limited_total[5m]) > 1
+        for: 10m
+        annotations:
+          summary: "Enregistrements refusés en masse par la limite par IP"
+      - alert: CreamoteRelayBandwidth
+        # Débit sortant du relay proche de la capacité de la liaison (ici
+        # 1 Gbit/s, à adapter).
+        expr: rate(creamote_relay_bytes_total[5m]) * 8 > 0.8e9
+        for: 10m
+        annotations:
+          summary: "Débit du relay au-delà de 80 % de la liaison"

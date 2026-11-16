@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -205,6 +205,20 @@ struct Ctx {
     frames: Arc<FrameQueue>,
     /// Une seule session à la fois (un seul écran, une seule projection).
     busy: AtomicBool,
+    /// Plafond de débit du relay annoncé par le serveur (0 : aucun).
+    relay_cap: AtomicU32,
+}
+
+/// Plafond de débit du relay (serveur public) : l'encodeur reste un peu en
+/// dessous pour ne pas remplir la file du relay.
+fn relay_cap(rv: &RendezvousClient) -> u32 {
+    rv.registration()
+        .policy
+        .as_ref()
+        .map(|p| p.max_relay_bitrate_bps)
+        .filter(|&bps| bps > 0)
+        .map(|bps| u32::try_from(bps * 9 / 10).unwrap_or(u32::MAX))
+        .unwrap_or(0)
 }
 
 async fn start(
@@ -294,6 +308,7 @@ async fn start(
         files_dir: config.files_dir.map(PathBuf::from),
         frames,
         busy: AtomicBool::new(false),
+        relay_cap: AtomicU32::new(relay_cap(&rv)),
     });
     tokio::spawn(run(rv, server, pin, options, ctx, stop_rx));
     Ok(service)
@@ -343,7 +358,10 @@ async fn run(
                     .map_err(MobileError::network)
             };
             match attempt.await {
-                Ok(rv) => break rv,
+                Ok(rv) => {
+                    ctx.relay_cap.store(relay_cap(&rv), Ordering::Relaxed);
+                    break rv;
+                }
                 Err(e) => tracing::info!("reconnexion : {e}"),
             }
         };
@@ -504,8 +522,12 @@ async fn session(
             events: None,
         }),
     };
+    let mut media = media(ctx);
+    if !direct {
+        media.max_bitrate_bps = ctx.relay_cap.load(Ordering::Relaxed);
+    }
     let (tx, rx) = chan.split();
-    host::serve_with(tx, rx, policy, media(ctx), sharing)
+    host::serve_with(tx, rx, policy, media, sharing)
         .await
         .map(|_| ())
         .map_err(|e| MobileError::Network {

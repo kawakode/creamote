@@ -28,6 +28,7 @@
         <label>Jeton d'API <input id="api-token" type="password"></label>
       </details>
       <label class="check"><input id="view-only" type="checkbox"> Vue seule (sans contrôle)</label>
+      <label class="check"><input id="share-clipboard" type="checkbox"> Synchroniser le presse-papier</label>
       <button type="submit" id="connect-btn">Se connecter</button>
       <p id="status" role="status"></p>
     </form>
@@ -39,11 +40,28 @@
       <span class="muted">Code <strong id="code"></strong></span>
       <span class="muted" id="stats"></span>
       <select id="displays" title="Écran"></select>
+      <span class="tools">
+        <button id="clipboard" type="button" class="tool" aria-pressed="false" hidden
+          title="Synchroniser le presse-papier avec le poste distant">Presse-papier</button>
+        <button id="send-files" type="button" class="tool" hidden
+          title="Envoyer des fichiers (ou glissez-les sur la fenêtre)">Envoyer des fichiers…</button>
+        <button id="send-folder" type="button" class="tool" hidden
+          title="Envoyer un dossier entier">Dossier…</button>
+      </span>
       <button id="disconnect" type="button">Déconnecter</button>
     </div>
     <div id="viewport">
       <canvas id="screen" tabindex="0"></canvas>
       <p id="waiting">En attente de l'accord de l'utilisateur distant…</p>
+      <div id="drop" hidden><p>Déposez ici pour envoyer au poste distant</p></div>
+      <aside id="transfers" hidden aria-label="Transferts de fichiers">
+        <header>
+          <strong>Transferts</strong>
+          <button id="open-downloads" type="button" class="link" title="">Dossier de réception</button>
+          <button id="clear-transfers" type="button" class="link">Effacer les terminés</button>
+        </header>
+        <ul id="transfer-list"></ul>
+      </aside>
     </div>
   </section>
 </body>

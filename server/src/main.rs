@@ -38,6 +38,26 @@ struct Args {
     /// défaut : 600 en mode public, illimitée sinon.
     #[arg(long)]
     max_relay_seconds: Option<u32>,
+    /// Débit maximal d'une session relay, par sens, en kbit/s (0 = illimité).
+    /// Par défaut : 5000 en mode public, illimité sinon.
+    #[arg(long)]
+    max_relay_kbps: Option<u64>,
+    /// Connexions simultanées par adresse IP, /64 en IPv6 (0 = illimité). Par
+    /// défaut : 32 en mode public, illimité sinon.
+    #[arg(long)]
+    max_connections_per_ip: Option<u32>,
+    /// Enregistrements de pairs par adresse IP et par minute (0 = illimité).
+    /// Par défaut : 20 en mode public, illimité sinon.
+    #[arg(long)]
+    registrations_per_minute: Option<u32>,
+    /// Demandes de session par adresse IP et par minute (0 = illimité). Par
+    /// défaut : 30 en mode public, illimité sinon.
+    #[arg(long)]
+    connect_requests_per_minute: Option<u32>,
+    /// Adresse HTTP des métriques Prometheus (`/metrics`), désactivées par
+    /// défaut. Elles ne contiennent ni ID ni adresse de pair.
+    #[arg(long, env = "CREAMOTE_METRICS_LISTEN")]
+    metrics_listen: Option<SocketAddr>,
     /// Base de données de la gestion de parc : `sqlite://…` ou
     /// `postgres://…`. Par défaut : SQLite dans le dossier des données.
     #[arg(long, env = "CREAMOTE_DATABASE_URL")]
@@ -145,6 +165,18 @@ async fn main() -> anyhow::Result<()> {
     if let Some(s) = args.max_relay_seconds {
         policy.max_relay_seconds = s;
     }
+    if let Some(k) = args.max_relay_kbps {
+        policy.max_relay_bitrate_bps = k.saturating_mul(1000);
+    }
+    if let Some(n) = args.max_connections_per_ip {
+        policy.max_connections_per_ip = n;
+    }
+    if let Some(n) = args.registrations_per_minute {
+        policy.registrations_per_ip_per_minute = n;
+    }
+    if let Some(n) = args.connect_requests_per_minute {
+        policy.connect_requests_per_ip_per_minute = n;
+    }
     // Pas de gestion de parc sur le serveur officiel.
     let (database_url, api_listen) = if policy.public_mode {
         (None, None)
@@ -187,9 +219,43 @@ async fn main() -> anyhow::Result<()> {
         }
     );
     println!(
-        "Relay      : {} sessions max, {} par IP, {} s max par session (0 = illimité)",
-        policy.max_relay_sessions, policy.max_relay_sessions_per_ip, policy.max_relay_seconds
+        "Relay      : {} sessions max, {} par IP, {} s et {} kbit/s max par session (0 = illimité)",
+        policy.max_relay_sessions,
+        policy.max_relay_sessions_per_ip,
+        policy.max_relay_seconds,
+        policy.max_relay_bitrate_bps / 1000
     );
+    println!(
+        "Par IP     : {} connexions, {} enregistrements/min, {} demandes/min (0 = illimité)",
+        policy.max_connections_per_ip,
+        policy.registrations_per_ip_per_minute,
+        policy.connect_requests_per_ip_per_minute
+    );
+    if let Some(addr) = args.metrics_listen {
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        println!("Métriques  : http://{}/metrics", listener.local_addr()?);
+        let source = server.metrics_source();
+        let app = axum::Router::new().route(
+            "/metrics",
+            axum::routing::get(move || {
+                let source = source.clone();
+                async move {
+                    (
+                        [(
+                            axum::http::header::CONTENT_TYPE,
+                            "text/plain; version=0.0.4; charset=utf-8",
+                        )],
+                        source(),
+                    )
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, app).await {
+                tracing::error!("métriques arrêtées : {e}");
+            }
+        });
+    }
     match server.api_addr() {
         Some(a) => {
             println!("API        : http://{a}/api/v1");
@@ -210,7 +276,25 @@ async fn main() -> anyhow::Result<()> {
     }
     println!("Les pairs se connectent avec --server <adresse> --server-pin <empreinte>.");
 
-    tokio::signal::ctrl_c().await?;
+    shutdown_signal().await?;
+    println!("Arrêt.");
     server.shutdown().await;
     Ok(())
+}
+
+/// Ctrl+C, ou SIGTERM (arrêt par systemd, `docker stop`).
+async fn shutdown_signal() -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = signal(SignalKind::terminate())?;
+        tokio::select! {
+            r = tokio::signal::ctrl_c() => r,
+            _ = term.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await
+    }
 }
