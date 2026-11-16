@@ -247,6 +247,20 @@ impl fmt::Debug for DeviceId {
     }
 }
 
+/// Vérifie une signature Ed25519 brute (ex. tickets signés par la clé de
+/// tickets d'un serveur).
+pub fn verify_ed25519(public_key: &[u8], msg: &[u8], signature: &[u8]) -> bool {
+    let Ok(key) = <&[u8; 32]>::try_from(public_key) else {
+        return false;
+    };
+    let Ok(key) = VerifyingKey::from_bytes(key) else {
+        return false;
+    };
+    Signature::from_slice(signature)
+        .and_then(|sig| key.verify_strict(msg, &sig))
+        .is_ok()
+}
+
 fn binding_message(noise_static: &[u8; 32]) -> Vec<u8> {
     [BINDING_CONTEXT, noise_static.as_slice()].concat()
 }

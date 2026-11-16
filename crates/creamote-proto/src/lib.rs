@@ -2,6 +2,7 @@
 //! messages sur un flux d'octets.
 
 pub mod framing;
+pub mod permissions;
 
 pub mod common {
     pub mod v1 {
@@ -18,6 +19,12 @@ pub mod rendezvous {
 pub mod session {
     pub mod v1 {
         include!(concat!(env!("OUT_DIR"), "/creamote.session.v1.rs"));
+    }
+}
+
+pub mod ticket {
+    pub mod v1 {
+        include!(concat!(env!("OUT_DIR"), "/creamote.ticket.v1.rs"));
     }
 }
 

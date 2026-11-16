@@ -118,11 +118,15 @@ pub async fn remove(
     Path(eid): Path<String>,
 ) -> ApiResult<StatusCode> {
     require_superadmin(&user)?;
-    // Les parcs se référencent entre eux : on les détache avant la cascade.
-    sqlx::query("UPDATE fleets SET parent_id = NULL WHERE entity_id = $1")
-        .bind(&eid)
-        .execute(st.db.pool())
-        .await?;
+    // Les parcs se référencent entre eux, et les machines les référencent :
+    // on les détache avant la cascade.
+    for q in [
+        "DELETE FROM devices WHERE entity_id = $1",
+        "DELETE FROM enrollment_tokens WHERE entity_id = $1",
+        "UPDATE fleets SET parent_id = NULL WHERE entity_id = $1",
+    ] {
+        sqlx::query(q).bind(&eid).execute(st.db.pool()).await?;
+    }
     let done = sqlx::query("DELETE FROM entities WHERE id = $1")
         .bind(&eid)
         .execute(st.db.pool())
@@ -138,6 +142,8 @@ pub async fn remove(
 #[derive(Deserialize)]
 pub struct PermissionsQuery {
     fleet_id: Option<String>,
+    /// Identifiant (UUID) d'une machine de l'entité.
+    device: Option<String>,
 }
 
 pub async fn my_permissions(
@@ -146,11 +152,20 @@ pub async fn my_permissions(
     Path(eid): Path<String>,
     Query(q): Query<PermissionsQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let target = match q.fleet_id.as_deref() {
-        Some(f) => Target::Fleet(f),
-        None => Target::Entity,
+    let access = st.access(&user, &eid).await?;
+    let fleet = match &q.device {
+        Some(d) => Some(super::device::device_fleet(&st, &eid, d).await?),
+        None => None,
     };
-    let p = st.permissions(&user, &eid, target).await?;
+    let target = match (&q.device, &fleet, q.fleet_id.as_deref()) {
+        (Some(id), fleet, _) => Target::Device {
+            id,
+            fleet: fleet.as_deref(),
+        },
+        (None, _, Some(f)) => Target::Fleet(f),
+        _ => Target::Entity,
+    };
+    let p = access.on(target);
     Ok(Json(json!({ "permissions": p })))
 }
 
@@ -432,6 +447,17 @@ pub async fn delete_fleet(
     if child.is_some() {
         return Err(ApiError::Conflict("le parc contient des sous-parcs".into()));
     }
+    let device = sqlx::query("SELECT 1 FROM devices WHERE fleet_id = $1")
+        .bind(&fid)
+        .fetch_optional(st.db.pool())
+        .await?;
+    if device.is_some() {
+        return Err(ApiError::Conflict("le parc contient des machines".into()));
+    }
+    sqlx::query("DELETE FROM enrollment_tokens WHERE fleet_id = $1")
+        .bind(&fid)
+        .execute(st.db.pool())
+        .await?;
     sqlx::query(
         "DELETE FROM role_bindings WHERE entity_id = $1 AND scope_kind = 'fleet' AND scope_id = $2",
     )
@@ -821,12 +847,15 @@ pub async fn create_binding(
         Some(Scope::Fleet(f)) if st.db.fleet_tree(&eid).await?.contains(&f) => Scope::Fleet(f),
         Some(Scope::Fleet(_)) => return Err(ApiError::BadRequest("parc inconnu".into())),
         Some(Scope::Entity) => Scope::Entity,
-        Some(Scope::Device(_)) => {
+        Some(Scope::Device(d)) if super::device::device_in_entity(&st, &eid, &d).await? => {
+            Scope::Device(d)
+        }
+        Some(Scope::Device(_)) => return Err(ApiError::BadRequest("machine inconnue".into())),
+        None => {
             return Err(ApiError::BadRequest(
-                "la portée machine arrive avec l'enrôlement des hosts".into(),
+                "portée : entity, fleet ou device".into(),
             ));
         }
-        None => return Err(ApiError::BadRequest("portée : entity ou fleet".into())),
     };
     let id = insert_binding(
         &st,

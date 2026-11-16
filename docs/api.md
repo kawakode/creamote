@@ -29,12 +29,12 @@ Une entité dont l'utilisateur n'est pas membre répond 404. La permission requi
 | Méthode | Chemin | Permission |
 | --- | --- | --- |
 | GET | `/entities`, `/entities/{eid}` | membre |
-| GET | `/entities/{eid}/my-permissions?fleet_id=` | membre |
+| GET | `/entities/{eid}/my-permissions?fleet_id=` ou `?device=` | membre |
 | GET, POST | `/entities/{eid}/members` (`{ email }`) | `manage_access` |
 | DELETE | `/entities/{eid}/members/{uid}` | `manage_access` |
 | GET, POST | `/entities/{eid}/fleets` (`{ name, parent_id? }`) | `manage_devices` sur le parent |
 | PATCH | `/entities/{eid}/fleets/{fid}` (`{ name?, parent_id? }`) | `manage_devices` sur le parc et la destination |
-| DELETE | `/entities/{eid}/fleets/{fid}` (sans sous-parc) | `manage_devices` |
+| DELETE | `/entities/{eid}/fleets/{fid}` (sans sous-parc ni machine) | `manage_devices` |
 | GET, POST | `/entities/{eid}/groups` (`{ name }`) | `manage_access` |
 | DELETE | `/entities/{eid}/groups/{gid}` | `manage_access` |
 | GET, POST | `/entities/{eid}/groups/{gid}/members` (`{ user_id }`) | `manage_access` |
@@ -44,8 +44,13 @@ Une entité dont l'utilisateur n'est pas membre répond 404. La permission requi
 | GET, POST | `/entities/{eid}/bindings` | `manage_access` |
 | DELETE | `/entities/{eid}/bindings/{bid}` | `manage_access` |
 | GET | `/entities/{eid}/audit?limit=` | `view_audit` |
+| GET, POST | `/entities/{eid}/enrollment-tokens` (`{ fleet_id, uses?: 1, ttl_hours?: 24 }`) | `manage_devices` sur le parc |
+| DELETE | `/entities/{eid}/enrollment-tokens/{tid}` | `manage_devices` sur le parc |
+| GET | `/entities/{eid}/devices`, `/entities/{eid}/devices/{did}` | au moins une permission sur la machine |
+| PATCH | `/entities/{eid}/devices/{did}` (`{ name?, fleet_id? }`) | `manage_devices` sur la machine et le parc de destination |
+| DELETE | `/entities/{eid}/devices/{did}` | `manage_devices` sur la machine |
 
-Une attribution : `{ "role_id": "technician", "subject": { "kind": "group", "id": "…" }, "scope": { "kind": "fleet", "id": "…" } }`. Sujet `user` ou `group`, portée `entity` ou `fleet` (la portée `device` arrive avec l'enrôlement des hosts). Une attribution sur un parc vaut pour ses sous-parcs.
+Une attribution : `{ "role_id": "technician", "subject": { "kind": "group", "id": "…" }, "scope": { "kind": "fleet", "id": "…" } }`. Sujet `user` ou `group`, portée `entity`, `fleet` ou `device`. Une attribution sur un parc vaut pour ses sous-parcs et leurs machines.
 
 Garde-fou : une opération qui laisserait l'entité sans personne disposant de `manage_access` au niveau entité est refusée (409).
 
@@ -59,3 +64,45 @@ Garde-fou : une opération qui laisserait l'entité sans personne disposant de `
 | `fleet-admin` | view_screen, control, clipboard, file_transfer, unattended, manage_devices |
 | `technician` | view_screen, control, clipboard, file_transfer |
 | `observer` | view_screen |
+
+## Machines et tickets de session
+
+**Enrôlement.** Un administrateur crée un jeton d'enrôlement (`cre_…`, montré
+une seule fois) pour un parc. Sur la machine :
+
+```sh
+creamote-host --server relay.example.org:21400 --server-pin <empreinte> \
+  --enroll cre_… --name "PC-Compta-01"
+```
+
+Le host prouve son identité au rendezvous, envoie le jeton, et reçoit en
+retour la clé publique avec laquelle le serveur signe les tickets. Il
+l'épingle dans `creamote-host.enrollment` (avec le serveur et son empreinte) :
+les démarrages suivants n'ont plus besoin d'option.
+
+**Tickets.** Pour se connecter à une machine enrôlée, le client demande un
+ticket :
+
+| Méthode | Chemin | Permission |
+| --- | --- | --- |
+| POST | `/tickets` (`{ device_id: "012 345 678", viewer_key: "<clé Ed25519 hex>" }`) → `{ ticket, permissions, expires_at }` | `view_screen` sur la machine |
+
+Le ticket (protobuf `creamote.ticket.v1.SignedTicket`, en hexadécimal) est
+signé par la clé de tickets du serveur (`ticket-signing.key` dans le dossier de
+données) et lie : le host, la clé de l'appareil qui se connecte, l'utilisateur,
+ses permissions effectives sur la machine, et une validité de 2 minutes. Le
+client le joint à sa demande de connexion ; le host enrôlé le vérifie et
+vérifie que la clé authentifiée par Noise est bien celle du ticket. Un ticket
+volé est donc inutilisable depuis un autre appareil.
+
+En attendant le consentement de l'utilisateur présent (M2), un host enrôlé
+n'accepte que les tickets accordant `view_screen` **et** `unattended`. Un host
+non enrôlé reste en mode développement et accepte toute demande.
+
+Avec la CLI :
+
+```sh
+export CREAMOTE_API_TOKEN=$(echo "$MOT_DE_PASSE" | creamote-cli login --api-url https://creamote.example.org --email moi@example.org)
+creamote-cli connect "012 345 678" --server relay.example.org:21400 --server-pin <empreinte> \
+  --api-url https://creamote.example.org
+```

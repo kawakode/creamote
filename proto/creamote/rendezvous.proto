@@ -114,6 +114,31 @@ message RelayJoin {
   bytes relay_token = 2;
 }
 
+// Un host enregistré rejoint un parc avec un jeton d'enrôlement créé par un
+// administrateur. Son identité est déjà prouvée par l'enregistrement.
+message EnrollRequest {
+  string token = 1;
+  // Nom affiché de la machine.
+  string name = 2;
+}
+
+message EnrollResponse {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    STATUS_OK = 1;
+    STATUS_INVALID_TOKEN = 2;
+    STATUS_ALREADY_ENROLLED = 3;
+    // Serveur sans gestion de parc (ex. serveur officiel).
+    STATUS_UNAVAILABLE = 4;
+  }
+  Status status = 1;
+  string entity_name = 2;
+  string fleet_name = 3;
+  // Clé publique Ed25519 avec laquelle le serveur signe les tickets de
+  // session. Le host l'épingle.
+  bytes ticket_public_key = 4;
+}
+
 message RendezvousMessage {
   oneof kind {
     RegisterPeer register_peer = 1;
@@ -124,5 +149,7 @@ message RendezvousMessage {
     RelayGrant relay_grant = 6;
     ConnectRejected connect_rejected = 7;
     RelayJoin relay_join = 8;
+    EnrollRequest enroll_request = 9;
+    EnrollResponse enroll_response = 10;
   }
 }

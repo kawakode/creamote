@@ -6,6 +6,8 @@
 //! - [`rendezvous`] : client du serveur de rendezvous (enregistrement prouvé,
 //!   demande de session, offres entrantes).
 //! - [`relay`] : connexion au relay avec le jeton délivré par le rendezvous.
+//! - [`ticket`] : tickets de session signés par le serveur de gestion, et
+//!   décision d'accepter une offre côté host.
 //! - [`secure`] : canal chiffré de bout en bout (Noise XX) au-dessus de
 //!   n'importe quel flux, typiquement un flux relay.
 
@@ -14,9 +16,11 @@ pub mod ident;
 pub mod relay;
 pub mod rendezvous;
 pub mod secure;
+pub mod ticket;
 pub mod tls;
 
 pub use creamote_proto::rendezvous::v1::connect_rejected::Reason as RejectReason;
+pub use creamote_proto::rendezvous::v1::enroll_response::Status as EnrollStatus;
 pub use creamote_proto::rendezvous::v1::register_peer_response::Status as RegisterStatus;
 
 /// Nom de serveur TLS utilisé par tous les pairs (le certificat est épinglé,
@@ -42,6 +46,8 @@ pub enum NetError {
     Crypto(#[from] creamote_crypto::CryptoError),
     #[error("enregistrement refusé par le serveur : {0:?}")]
     Registration(RegisterStatus),
+    #[error("enrôlement refusé : {0:?}")]
+    Enrollment(EnrollStatus),
     #[error("session refusée : {0:?}")]
     Rejected(RejectReason),
     #[error("protocole : {0}")]
