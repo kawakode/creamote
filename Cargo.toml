@@ -14,7 +14,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 repository = "https://github.com/kawakode/creamote"
-# Licence à confirmer (voir docs/adr/0001-stack.md)
+license = "AGPL-3.0-only"
 publish = false
 
 [workspace.dependencies]

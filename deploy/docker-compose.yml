@@ -12,7 +12,7 @@ services:
     volumes:
       - creamote-data:/data
     # Pour un serveur public (limites de sessions relay) :
-    # command: ["--public", "--max-relay-sessions", "200", "--max-relay-seconds", "1800"]
+    # command: ["--public", "--max-relay-sessions-per-ip", "1", "--max-relay-seconds", "600"]
 
 volumes:
   creamote-data:
