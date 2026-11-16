@@ -70,6 +70,7 @@ fn media(log: Log) -> Media {
         capturer: Arc::new(|_| Ok(Box::new(Synthetic(0)) as Box<dyn Capturer>)),
         injector: Arc::new(move |_| Ok(Box::new(Spy(log.clone())) as Box<dyn InputSink>)),
         encoder: Preference::Software,
+        encoded: None,
     }
 }
 
@@ -460,6 +461,7 @@ async fn display_changes_are_announced_and_capture_falls_back_to_primary() {
             }),
             injector: Arc::new(|_| Ok(Box::new(Spy(Log::default())) as Box<dyn InputSink>)),
             encoder: Preference::Software,
+            encoded: None,
         }
     };
     let (a, b) = tokio::io::duplex(1 << 20);
@@ -508,6 +510,132 @@ async fn display_changes_are_announced_and_capture_falls_back_to_primary() {
             _ => {}
         }
     }
+    handle.close().await;
+    host.await.unwrap().unwrap();
+}
+
+/// Source déjà encodée (comme MediaProjection + MediaCodec sur Android) :
+/// images factices, rotation après quelques images.
+struct FakeEncoded {
+    count: u64,
+    keyframe_requests: Arc<Mutex<u32>>,
+    bitrate: u32,
+}
+
+impl host::EncodedSource for FakeEncoded {
+    fn display(&self) -> DisplayInfo {
+        display()
+    }
+    fn name(&self) -> String {
+        "MediaCodec factice".into()
+    }
+    fn size(&self) -> (u32, u32) {
+        if self.count > 5 {
+            (180, 320)
+        } else {
+            (320, 180)
+        }
+    }
+    fn bitrate(&self) -> u32 {
+        self.bitrate
+    }
+    fn next(&mut self, _: Duration) -> Result<Option<creamote_codec::EncodedFrame>, String> {
+        std::thread::sleep(Duration::from_millis(5));
+        self.count += 1;
+        let keyframe =
+            std::mem::take(&mut *self.keyframe_requests.lock().unwrap()) > 0 || self.count == 6;
+        Ok(Some(creamote_codec::EncodedFrame {
+            data: vec![self.count as u8; 100],
+            keyframe,
+            captured_at: Instant::now(),
+        }))
+    }
+    fn request_keyframe(&mut self) {
+        *self.keyframe_requests.lock().unwrap() += 1;
+    }
+    fn set_bitrate(&mut self, bps: u32) {
+        self.bitrate = bps;
+    }
+}
+
+#[tokio::test]
+async fn encoded_source_streams_with_flow_control_and_resizes() {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let media = {
+        let requests = requests.clone();
+        Media::encoded(
+            Arc::new(|| Ok(vec![display()])),
+            Arc::new(move |r: host::SourceRequest| {
+                requests.lock().unwrap().push(r);
+                Ok(Box::new(FakeEncoded {
+                    count: 0,
+                    keyframe_requests: Arc::default(),
+                    bitrate: 2_000_000,
+                }) as Box<dyn host::EncodedSource>)
+            }),
+            Arc::new(|_| Ok(Box::new(Spy(Log::default())) as Box<dyn InputSink>)),
+        )
+    };
+    let (a, b) = tokio::io::duplex(1 << 20);
+    let (v_id, h_id) = (DeviceIdentity::generate(), DeviceIdentity::generate());
+    let (v, h) = tokio::join!(
+        SecureChannel::initiate(a, &v_id),
+        SecureChannel::respond(b, &h_id)
+    );
+    let policy = Policy {
+        allowed: Permissions::ALL,
+        consent: None,
+        user_email: None,
+    };
+    let (htx, hrx) = h.unwrap().split();
+    let host = tokio::spawn(host::serve(htx, hrx, policy, media));
+    let (vtx, vrx) = v.unwrap().split();
+    let (handle, mut events) = viewer::start(vtx, vrx, Options::default());
+
+    assert!(matches!(next(&mut events).await, Event::Accepted { .. }));
+    let Event::Video(cfg) = next(&mut events).await else {
+        panic!("VideoConfig attendu");
+    };
+    assert_eq!((cfg.width, cfg.height), (320, 180));
+    assert_eq!(cfg.encoder, "MediaCodec factice");
+    assert_eq!(cfg.target_bitrate_bps, 2_000_000);
+
+    // La première image est une image clé (demandée à l'ouverture). Sans
+    // accusé, le host n'envoie pas plus de MAX_FRAMES_IN_FLIGHT images.
+    let mut frames = Vec::new();
+    while frames.len() < 3 {
+        if let Event::Frame(f) = next(&mut events).await {
+            frames.push(f);
+        }
+    }
+    assert!(frames[0].keyframe);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), events.recv())
+            .await
+            .is_err(),
+        "image envoyée au-delà de la fenêtre"
+    );
+    for f in &frames {
+        handle.ack(f.frame_id).await.unwrap();
+    }
+
+    // Rotation : nouveau VideoConfig avant l'image clé suivante.
+    let mut rotated = false;
+    loop {
+        match next(&mut events).await {
+            Event::Video(c) if (c.width, c.height) == (180, 320) => rotated = true,
+            Event::Frame(f) => {
+                handle.ack(f.frame_id).await.unwrap();
+                if rotated {
+                    assert!(f.keyframe);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let r = requests.lock().unwrap()[0];
+    assert_eq!((r.display_id, r.fps, r.bitrate_bps), (Some(7), 30, 0));
     handle.close().await;
     host.await.unwrap().unwrap();
 }

@@ -199,92 +199,116 @@ pub trait ClipboardBackend: Send + 'static {
     }
 }
 
-/// Presse-papier de l'OS via `arboard` (API natives).
-pub struct NativeClipboard {
-    inner: arboard::Clipboard,
-    /// Dernière image lue (empreinte des pixels, PNG) : évite de réencoder
-    /// la même image à chaque lecture.
-    image_cache: Option<([u8; 32], Vec<u8>)>,
-}
+#[cfg(not(target_os = "android"))]
+pub use native::NativeClipboard;
 
+/// Android : le presse-papier passe par `ClipboardManager` (Java), fourni
+/// par l'app comme [`ClipboardBackend`].
+#[cfg(target_os = "android")]
+pub struct NativeClipboard;
+
+#[cfg(target_os = "android")]
 impl NativeClipboard {
     pub fn new() -> Result<Self, ClipboardError> {
-        Ok(Self {
-            inner: arboard::Clipboard::new().map_err(os)?,
-            image_cache: None,
-        })
+        Err(ClipboardError::Os(
+            "presse-papier natif fourni par l'app Android".into(),
+        ))
     }
 }
 
-fn os(e: arboard::Error) -> ClipboardError {
-    ClipboardError::Os(e.to_string())
-}
+#[cfg(not(target_os = "android"))]
+mod native {
+    use super::*;
 
-/// `Ok(None)` quand le format est simplement absent.
-fn optional<T>(r: Result<T, arboard::Error>) -> Result<Option<T>, ClipboardError> {
-    match r {
-        Ok(v) => Ok(Some(v)),
-        Err(arboard::Error::ContentNotAvailable | arboard::Error::ConversionFailure) => Ok(None),
-        Err(e) => Err(os(e)),
+    /// Presse-papier de l'OS via `arboard` (API natives).
+    pub struct NativeClipboard {
+        inner: arboard::Clipboard,
+        /// Dernière image lue (empreinte des pixels, PNG) : évite de réencoder
+        /// la même image à chaque lecture.
+        image_cache: Option<([u8; 32], Vec<u8>)>,
     }
-}
 
-impl ClipboardBackend for NativeClipboard {
-    fn read(&mut self) -> Result<ClipboardContent, ClipboardError> {
-        let text = optional(self.inner.get_text())?;
-        let html = optional(self.inner.get().html())?;
-        // Une image n'est lue qu'en l'absence de texte (une copie depuis un
-        // traitement de texte porte souvent les deux).
-        let png = if text.is_none() {
-            match optional(self.inner.get_image())? {
-                Some(img) => {
-                    let key = *blake3::hash(&img.bytes).as_bytes();
-                    match &self.image_cache {
-                        Some((k, png)) if *k == key => Some(png.clone()),
-                        _ => {
-                            let png = encode_png(img.width, img.height, &img.bytes)?;
-                            self.image_cache = Some((key, png.clone()));
-                            Some(png)
+    impl NativeClipboard {
+        pub fn new() -> Result<Self, ClipboardError> {
+            Ok(Self {
+                inner: arboard::Clipboard::new().map_err(os)?,
+                image_cache: None,
+            })
+        }
+    }
+
+    fn os(e: arboard::Error) -> ClipboardError {
+        ClipboardError::Os(e.to_string())
+    }
+
+    /// `Ok(None)` quand le format est simplement absent.
+    fn optional<T>(r: Result<T, arboard::Error>) -> Result<Option<T>, ClipboardError> {
+        match r {
+            Ok(v) => Ok(Some(v)),
+            Err(arboard::Error::ContentNotAvailable | arboard::Error::ConversionFailure) => {
+                Ok(None)
+            }
+            Err(e) => Err(os(e)),
+        }
+    }
+
+    impl ClipboardBackend for NativeClipboard {
+        fn read(&mut self) -> Result<ClipboardContent, ClipboardError> {
+            let text = optional(self.inner.get_text())?;
+            let html = optional(self.inner.get().html())?;
+            // Une image n'est lue qu'en l'absence de texte (une copie depuis un
+            // traitement de texte porte souvent les deux).
+            let png = if text.is_none() {
+                match optional(self.inner.get_image())? {
+                    Some(img) => {
+                        let key = *blake3::hash(&img.bytes).as_bytes();
+                        match &self.image_cache {
+                            Some((k, png)) if *k == key => Some(png.clone()),
+                            _ => {
+                                let png = encode_png(img.width, img.height, &img.bytes)?;
+                                self.image_cache = Some((key, png.clone()));
+                                Some(png)
+                            }
                         }
                     }
+                    None => None,
                 }
-                None => None,
+            } else {
+                None
+            };
+            Ok(ClipboardContent { text, html, png })
+        }
+
+        fn write(&mut self, content: &ClipboardContent) -> Result<(), ClipboardError> {
+            if let Some(html) = &content.html {
+                self.inner
+                    .set_html(html.as_str(), content.text.as_deref())
+                    .map_err(os)
+            } else if let Some(text) = &content.text {
+                self.inner.set_text(text.as_str()).map_err(os)
+            } else if let Some(png) = &content.png {
+                let (width, height, rgba) = decode_png(png)?;
+                self.inner
+                    .set_image(arboard::ImageData {
+                        width,
+                        height,
+                        bytes: rgba.into(),
+                    })
+                    .map_err(os)
+            } else {
+                Ok(())
             }
-        } else {
-            None
-        };
-        Ok(ClipboardContent { text, html, png })
-    }
-
-    fn write(&mut self, content: &ClipboardContent) -> Result<(), ClipboardError> {
-        if let Some(html) = &content.html {
-            self.inner
-                .set_html(html.as_str(), content.text.as_deref())
-                .map_err(os)
-        } else if let Some(text) = &content.text {
-            self.inner.set_text(text.as_str()).map_err(os)
-        } else if let Some(png) = &content.png {
-            let (width, height, rgba) = decode_png(png)?;
-            self.inner
-                .set_image(arboard::ImageData {
-                    width,
-                    height,
-                    bytes: rgba.into(),
-                })
-                .map_err(os)
-        } else {
-            Ok(())
         }
-    }
 
-    fn change_count(&mut self) -> Option<u64> {
-        #[cfg(windows)]
-        {
-            clipboard_win::seq_num().map(|n| u64::from(n.get()))
-        }
-        #[cfg(not(windows))]
-        {
-            None
+        fn change_count(&mut self) -> Option<u64> {
+            #[cfg(windows)]
+            {
+                clipboard_win::seq_num().map(|n| u64::from(n.get()))
+            }
+            #[cfg(not(windows))]
+            {
+                None
+            }
         }
     }
 }

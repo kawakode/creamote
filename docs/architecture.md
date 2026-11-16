@@ -53,6 +53,15 @@ Wayland n'autorise ni capture ni injection directes : le host passe par **xdg-de
 - **Limites** : la liste des écrans est celle choisie dans la boîte (pas de branchement à chaud) ; le host doit tourner dans la session graphique de l'utilisateur (bus D-Bus de session) ; pas encore de DMA-BUF (zéro-copie).
 - **Test** : `tools/wayland-lab.sh` (job CI) lance un bus D-Bus privé, PipeWire, WirePlumber et une source GStreamer ; le test sert lui-même un faux portail et vérifie les appels D-Bus, l'image reçue, les entrées, la fermeture et le jeton de restauration.
 
+## Android (M5)
+
+Détails et alternatives dans [ADR 0004](adr/0004-android.md).
+
+- **Cœur partagé** : `creamote-mobile` (même réseau, même session, même chiffrement que le desktop), compilé par `cargo-ndk` et exposé à Kotlin par uniffi (`android/core`).
+- **Host** : MediaProjection rend dans la surface d'entrée d'un encodeur MediaCodec ; l'app pousse les images H.264 au cœur, qui les traite comme une `EncodedSource` (contrôle de flux, débit adaptatif, images clés à la demande). Une seule session à la fois. Les entrées sont remises à l'app (usage HID + `KEYCODE_*`, pointeur normalisé) pour un AccessibilityService ou une API constructeur.
+- **Viewer** : décodage MediaCodec dans l'app, accusé de chaque image.
+- **Presse-papier** : texte, via `ClipboardManager` (lecture possible seulement au premier plan depuis Android 10).
+
 ## Serveur officiel et serveurs custom
 
 Un seul binaire `creamote-server`. En mode `public` il applique une `ServerPolicy` (au relay seulement, une connexion directe ne coûtant rien au serveur) : **une session relay à la fois par adresse IP du demandeur**, **10 minutes maximum par session** et 200 sessions au total, valeurs réglables. Le serveur officiel n'offre pas la gestion de parc (comptes, entités, RBAC) : elle est réservée aux serveurs auto-hébergés. Le plafond de débit et la limitation de l'enregistrement d'IDs arrivent en M6. Client et host conservent une liste de serveurs, chacun épinglé par son empreinte.

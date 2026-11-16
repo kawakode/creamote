@@ -9,6 +9,7 @@ members = [
     "crates/creamote-input",
     "crates/creamote-session",
     "crates/creamote-transfer",
+    "crates/creamote-mobile",
     "server",
     "host",
     "cli",
