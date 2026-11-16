@@ -1,6 +1,6 @@
 # Creamote
 
-Suite de prise de contrôle à distance multiplateforme (Windows, macOS, Linux, Android), chiffrée de bout en bout et auto-hébergeable.
+Suite de prise de contrôle à distance multiplateforme (Windows, macOS, Linux, Android), chiffrée de bout en bout et auto-hébergeable. Logiciel libre sous licence [AGPL-3.0](LICENSE).
 
 | Composant | Rôle |
 | --- | --- |
@@ -9,7 +9,7 @@ Suite de prise de contrôle à distance multiplateforme (Windows, macOS, Linux, 
 | **Host** (`host/`, Rust) | Service installé sur une machine destinée à être contrôlée sans surveillance. |
 | **Serveur** (`server/`, Rust) | Rendezvous + relay auto-hébergeable, carnet d'adresses, entités, parcs de machines, RBAC et groupes de sécurité. |
 
-Client et host choisissent leur serveur : un serveur auto-hébergé, ou le serveur officiel (nombre de connexions et durée des sessions relay limités). Dans tous les cas le relay ne voit que des octets chiffrés : l'image et les entrées sont chiffrées entre les deux appareils (Noise XX).
+Client et host choisissent leur serveur : un serveur auto-hébergé, ou le serveur officiel (une session relay à la fois par IP, 10 minutes maximum, sans gestion de parc). Dans tous les cas le relay ne voit que des octets chiffrés : l'image et les entrées sont chiffrées entre les deux appareils (Noise XX).
 
 ## État
 

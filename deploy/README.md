@@ -16,4 +16,4 @@ cargo build --release -p creamote-server
 ./target/release/creamote-server --data-dir /var/lib/creamote
 ```
 
-Options utiles : `--relay-addr` (adresse publique annoncée pour le relay), `--public` (mode serveur officiel : 200 sessions relay simultanées et 30 min par session par défaut), `--max-relay-sessions`, `--max-relay-seconds`.
+Options utiles : `--relay-addr` (adresse publique annoncée pour le relay), `--public` (mode serveur officiel : une session relay à la fois par IP, 10 min par session, 200 sessions au total), `--max-relay-sessions`, `--max-relay-sessions-per-ip`, `--max-relay-seconds`.

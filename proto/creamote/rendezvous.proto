@@ -46,6 +46,8 @@ message ServerPolicy {
   uint32 max_relay_session_seconds = 3;
   // 0 = illimité.
   uint64 max_relay_bitrate_bps = 4;
+  // Sessions relay simultanées par adresse IP du demandeur, 0 = illimité.
+  uint32 max_relay_sessions_per_ip = 5;
 }
 
 // Le client demande à joindre un appareil.
@@ -97,6 +99,8 @@ message ConnectRejected {
     REASON_RELAY_FULL = 3;
     REASON_NOT_REGISTERED = 4;
     REASON_INVALID_REQUEST = 5;
+    // Quota du serveur atteint pour cette adresse IP (serveur public).
+    REASON_QUOTA_EXCEEDED = 6;
   }
   uint64 request_id = 1;
   Reason reason = 2;

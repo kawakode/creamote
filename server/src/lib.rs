@@ -12,7 +12,7 @@
 //! sessions relay simultanées et leur durée.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -47,6 +47,8 @@ pub struct Policy {
     pub public_mode: bool,
     /// Sessions relay simultanées, 0 = illimité.
     pub max_relay_sessions: u32,
+    /// Sessions relay simultanées par adresse IP du demandeur, 0 = illimité.
+    pub max_relay_sessions_per_ip: u32,
     /// Durée maximale d'une session relay, 0 = illimitée.
     pub max_relay_seconds: u32,
     /// Délai laissé aux deux pairs pour rejoindre le relay.
@@ -59,17 +61,20 @@ impl Policy {
         Self {
             public_mode: false,
             max_relay_sessions: 0,
+            max_relay_sessions_per_ip: 0,
             max_relay_seconds: 0,
             relay_join_timeout: Duration::from_secs(30),
         }
     }
 
-    /// Serveur officiel : valeurs par défaut, ajustables.
+    /// Serveur officiel : une session relay à la fois par IP, 10 minutes
+    /// maximum, 200 sessions au total. Valeurs ajustables.
     pub fn public() -> Self {
         Self {
             public_mode: true,
             max_relay_sessions: 200,
-            max_relay_seconds: 30 * 60,
+            max_relay_sessions_per_ip: 1,
+            max_relay_seconds: 10 * 60,
             relay_join_timeout: Duration::from_secs(30),
         }
     }
@@ -80,6 +85,7 @@ impl Policy {
             max_concurrent_relay_sessions: self.max_relay_sessions,
             max_relay_session_seconds: self.max_relay_seconds,
             max_relay_bitrate_bps: 0,
+            max_relay_sessions_per_ip: self.max_relay_sessions_per_ip,
         }
     }
 }
@@ -119,6 +125,7 @@ impl Server {
             peers: Mutex::default(),
             pending: Mutex::default(),
             relays: Mutex::default(),
+            ip_sessions: Arc::default(),
             next_conn: AtomicU64::new(1),
         });
 
@@ -164,6 +171,7 @@ struct Peer {
 
 struct Pending {
     host: DeviceId,
+    viewer_ip: IpAddr,
     viewer_tx: mpsc::Sender<RendezvousMessage>,
     request_id: u64,
     created: tokio::time::Instant,
@@ -172,7 +180,48 @@ struct Pending {
 struct RelaySlot {
     tokens: [Token; 2],
     waiting: Option<(usize, Pipe)>,
-    permit: Option<OwnedSemaphorePermit>,
+    quota: Quota,
+}
+
+/// Places occupées par une session relay (globale et par IP), libérées
+/// automatiquement à la fin de la session ou à l'expiration du créneau.
+struct Quota {
+    _global: Option<OwnedSemaphorePermit>,
+    _ip: Option<IpGuard>,
+}
+
+type IpCounts = Arc<Mutex<HashMap<IpAddr, u32>>>;
+
+struct IpGuard {
+    counts: IpCounts,
+    ip: IpAddr,
+}
+
+impl IpGuard {
+    fn acquire(counts: &IpCounts, ip: IpAddr, max: u32) -> Option<Self> {
+        let mut map = counts.lock().expect("verrou sain");
+        let n = map.entry(ip).or_insert(0);
+        if *n >= max {
+            return None;
+        }
+        *n += 1;
+        Some(Self {
+            counts: counts.clone(),
+            ip,
+        })
+    }
+}
+
+impl Drop for IpGuard {
+    fn drop(&mut self) {
+        let mut map = self.counts.lock().expect("verrou sain");
+        if let Some(n) = map.get_mut(&self.ip) {
+            *n -= 1;
+            if *n == 0 {
+                map.remove(&self.ip);
+            }
+        }
+    }
 }
 
 struct State {
@@ -182,6 +231,7 @@ struct State {
     peers: Mutex<HashMap<DeviceId, Peer>>,
     pending: Mutex<HashMap<SessionId, Pending>>,
     relays: Mutex<HashMap<SessionId, RelaySlot>>,
+    ip_sessions: IpCounts,
     next_conn: AtomicU64,
 }
 
@@ -346,6 +396,7 @@ fn handle_request(
             session_id,
             Pending {
                 host: target,
+                viewer_ip: conn.remote_address().ip(),
                 viewer_tx: viewer_tx.clone(),
                 request_id: req.request_id,
                 created: tokio::time::Instant::now(),
@@ -390,7 +441,17 @@ fn handle_answer(
     if !ans.accepted {
         return reject(&p.viewer_tx, p.request_id, RejectReason::Declined);
     }
-    let permit = match &state.permits {
+    let ip = match state.policy.max_relay_sessions_per_ip {
+        0 => None,
+        max => match IpGuard::acquire(&state.ip_sessions, p.viewer_ip, max) {
+            Some(guard) => Some(guard),
+            None => {
+                tracing::info!(ip = %p.viewer_ip, "quota de sessions relay atteint pour cette IP");
+                return reject(&p.viewer_tx, p.request_id, RejectReason::QuotaExceeded);
+            }
+        },
+    };
+    let global = match &state.permits {
         Some(sem) => match sem.clone().try_acquire_owned() {
             Ok(permit) => Some(permit),
             Err(_) => {
@@ -400,6 +461,10 @@ fn handle_answer(
         },
         None => None,
     };
+    let quota = Quota {
+        _global: global,
+        _ip: ip,
+    };
 
     let tokens: [Token; 2] = [random(), random()];
     state.relays.lock().expect("verrou sain").insert(
@@ -407,7 +472,7 @@ fn handle_answer(
         RelaySlot {
             tokens,
             waiting: None,
-            permit,
+            quota,
         },
     );
     // Libère le créneau si les deux pairs ne se présentent pas à temps.
@@ -452,7 +517,7 @@ fn relay_join(state: Arc<State>, send: SendStream, recv: RecvStream, join: Relay
         match slot.waiting.take() {
             Some((other_side, other)) if other_side != side => {
                 let slot = relays.remove(&session_id).expect("présent");
-                Some((other, pipe, slot.permit))
+                Some((other, pipe, slot.quota))
             }
             Some(first) => {
                 // Même côté présenté deux fois : on garde le premier.
@@ -465,13 +530,13 @@ fn relay_join(state: Arc<State>, send: SendStream, recv: RecvStream, join: Relay
             }
         }
     };
-    if let Some((a, b, permit)) = paired {
+    if let Some((a, b, quota)) = paired {
         let max = state.policy.max_relay_seconds;
-        tokio::spawn(pump(a, b, permit, max));
+        tokio::spawn(pump(a, b, quota, max));
     }
 }
 
-async fn pump(mut a: Pipe, mut b: Pipe, permit: Option<OwnedSemaphorePermit>, max_secs: u32) {
+async fn pump(mut a: Pipe, mut b: Pipe, quota: Quota, max_secs: u32) {
     tracing::info!("session relay ouverte");
     let copy = tokio::io::copy_bidirectional(&mut a, &mut b);
     let outcome = if max_secs > 0 {
@@ -479,7 +544,7 @@ async fn pump(mut a: Pipe, mut b: Pipe, permit: Option<OwnedSemaphorePermit>, ma
             Ok(r) => r,
             Err(_) => {
                 tracing::info!("session relay coupée : durée maximale atteinte");
-                drop(permit);
+                drop(quota);
                 return;
             }
         }
@@ -494,5 +559,5 @@ async fn pump(mut a: Pipe, mut b: Pipe, permit: Option<OwnedSemaphorePermit>, ma
         ),
         Err(e) => tracing::info!("session relay interrompue : {e}"),
     }
-    drop(permit);
+    drop(quota);
 }

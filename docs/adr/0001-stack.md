@@ -21,8 +21,10 @@ Creamote doit tourner sur Windows, macOS, Linux et Android, capturer et encoder 
 - Flutter sur les quatre OS : une seule interface, mais un runtime de plus et une couche FFI Dart. Écarté au profit d'une UI web desktop et d'une app Android native.
 - Serveur en Go : plus simple à écrire, mais protocole et crypto dupliqués.
 
-## Points ouverts
+## Décisions complémentaires (2026-11-16)
 
-- Licence du projet.
-- Limites exactes du serveur officiel.
-- Console web d'administration en plus de l'app.
+- **Licence** : AGPL-3.0 (`AGPL-3.0-only`). Toute personne qui modifie le serveur et l'expose sur le réseau doit publier ses modifications.
+- **Serveur officiel** : pas de gestion de parc pour l'instant ; une session relay à la fois par adresse IP du demandeur ; 10 minutes maximum par session.
+- **Base de données** : SQLite par défaut, PostgreSQL en option (confirmé).
+- **Console web d'administration** : indispensable, livrée avec la gestion de parc (M4).
+- **Android** : viser aussi les API constructeur (Samsung Knox, etc.) en plus d'AccessibilityService, pour éviter les limitations selon les appareils.

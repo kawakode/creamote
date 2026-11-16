@@ -25,8 +25,12 @@ struct Args {
     /// public, illimité sinon.
     #[arg(long)]
     max_relay_sessions: Option<u32>,
+    /// Sessions relay simultanées par IP du demandeur (0 = illimité). Par
+    /// défaut : 1 en mode public, illimité sinon.
+    #[arg(long)]
+    max_relay_sessions_per_ip: Option<u32>,
     /// Durée maximale d'une session relay en secondes (0 = illimitée). Par
-    /// défaut : 1800 en mode public, illimitée sinon.
+    /// défaut : 600 en mode public, illimitée sinon.
     #[arg(long)]
     max_relay_seconds: Option<u32>,
 }
@@ -47,6 +51,9 @@ async fn main() -> anyhow::Result<()> {
     };
     if let Some(n) = args.max_relay_sessions {
         policy.max_relay_sessions = n;
+    }
+    if let Some(n) = args.max_relay_sessions_per_ip {
+        policy.max_relay_sessions_per_ip = n;
     }
     if let Some(s) = args.max_relay_seconds {
         policy.max_relay_seconds = s;
@@ -72,8 +79,8 @@ async fn main() -> anyhow::Result<()> {
         }
     );
     println!(
-        "Relay      : {} sessions max, {} s max par session (0 = illimité)",
-        policy.max_relay_sessions, policy.max_relay_seconds
+        "Relay      : {} sessions max, {} par IP, {} s max par session (0 = illimité)",
+        policy.max_relay_sessions, policy.max_relay_sessions_per_ip, policy.max_relay_seconds
     );
     println!("Les pairs se connectent avec --server <adresse> --server-pin <empreinte>.");
 

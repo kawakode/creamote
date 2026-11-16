@@ -19,7 +19,7 @@ Vue d'ensemble ; les décisions détaillées sont dans `docs/adr/`.
 
 ## Serveur officiel et serveurs custom
 
-Un seul binaire `creamote-server`. En mode `public` il applique une `ServerPolicy` : sessions relay simultanées plafonnées (200 par défaut) et durée maximale par session relay (30 min par défaut), toutes deux réglables. Le plafond de débit, les limites par appareil/IP et la limitation de l'enregistrement d'IDs arrivent en M6. Client et host conservent une liste de serveurs, chacun épinglé par son empreinte.
+Un seul binaire `creamote-server`. En mode `public` il applique une `ServerPolicy` : **une session relay à la fois par adresse IP du demandeur**, **10 minutes maximum par session** et 200 sessions au total, valeurs réglables. Le serveur officiel n'offre pas la gestion de parc (comptes, entités, RBAC) : elle est réservée aux serveurs auto-hébergés. Le plafond de débit et la limitation de l'enregistrement d'IDs arrivent en M6. Client et host conservent une liste de serveurs, chacun épinglé par son empreinte.
 
 ## Gestion de parc (M4)
 
@@ -33,6 +33,6 @@ Un rôle (ensemble de permissions) est attribué à un utilisateur ou un groupe 
 | M1 | Serveur rendezvous + relay, outil CLI de session chiffrée de test |
 | M2 | Capture, H.264 et input sur Windows, macOS, Linux X11 ; client desktop Tauri minimal |
 | M3 | Hole punching P2P, débit adaptatif, multi-écrans, presse-papier, fichiers, Wayland |
-| M4 | Comptes, carnet d'adresses, entités, parcs, RBAC, groupes, tickets signés, audit, console web |
-| M5 | App Android native (Kotlin + cœur Rust via JNI) : client, host via MediaProjection + AccessibilityService |
+| M4 | Comptes, carnet d'adresses, entités, parcs, RBAC, groupes, tickets signés, audit, console web d'administration |
+| M5 | App Android native (Kotlin + cœur Rust via JNI) : client, host via MediaProjection + AccessibilityService, et API constructeur (Samsung Knox, etc.) quand elles sont disponibles |
 | M6 | Mode public du serveur officiel, installeurs signés, mise à jour auto, déploiement de masse |

@@ -127,6 +127,7 @@ async fn wrong_server_pin_is_refused() {
 async fn public_mode_caps_concurrent_relay_sessions() {
     let mut policy = Policy::public();
     policy.max_relay_sessions = 1;
+    policy.max_relay_sessions_per_ip = 0;
     let (_server, addr, pin) = start(policy).await;
     let host = spawn_host(addr, pin, true).await;
 
@@ -136,6 +137,32 @@ async fn public_mode_caps_concurrent_relay_sessions() {
 
     let err = open_session(addr, pin, host).await.err().unwrap();
     assert!(matches!(err, NetError::Rejected(RejectReason::RelayFull)));
+}
+
+#[tokio::test]
+async fn public_mode_allows_one_relay_session_per_ip() {
+    let (_server, addr, pin) = start(Policy::public()).await;
+    let host = spawn_host(addr, pin, true).await;
+
+    let (first, rv1) = open_session(addr, pin, host).await.unwrap();
+    let err = open_session(addr, pin, host).await.err().unwrap();
+    assert!(matches!(
+        err,
+        NetError::Rejected(RejectReason::QuotaExceeded)
+    ));
+
+    // La place se libère quand la première session se termine.
+    first.close().await.unwrap();
+    rv1.close();
+    let mut freed = false;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if open_session(addr, pin, host).await.is_ok() {
+            freed = true;
+            break;
+        }
+    }
+    assert!(freed, "la place de l'IP n'a pas été libérée");
 }
 
 #[tokio::test]
