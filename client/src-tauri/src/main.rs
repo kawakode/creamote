@@ -228,6 +228,13 @@ async fn open(
                         let _ = frames.send(InvokeResponseBody::Raw(m));
                     }
                 },
+                Event::Displays(displays) => {
+                    let displays: Vec<_> = displays
+                        .iter()
+                        .map(|d| json!({"id": d.id, "name": d.name, "width": d.width, "height": d.height, "primary": d.primary}))
+                        .collect();
+                    let _ = events.send(json!({ "type": "displays", "displays": displays }));
+                }
                 // Transfert de fichiers : pas encore proposé par cette
                 // interface (la session ne l'active pas).
                 Event::Files(_) => {}

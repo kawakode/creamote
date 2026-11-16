@@ -20,6 +20,7 @@ use prost::Message;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 pub mod host;
+pub mod rate;
 pub mod sharing;
 pub mod viewer;
 

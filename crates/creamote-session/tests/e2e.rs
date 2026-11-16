@@ -169,6 +169,8 @@ async fn video_flows_and_control_is_injected() {
                 handle.ack(f.frame_id).await.unwrap();
                 decoded += 1;
             }
+            // Débit adaptatif : nouveau VideoConfig informatif possible.
+            Event::Video(_) => {}
             other => panic!("image attendue : {other:?}"),
         }
     }
@@ -406,6 +408,106 @@ async fn view_only_consent_disables_sharing() {
     *viewer_clip.0.lock().unwrap() = text("secret");
     tokio::time::sleep(Duration::from_millis(1500)).await;
     assert_eq!(*host_clip.0.lock().unwrap(), ClipboardContent::default());
+    handle.close().await;
+    host.await.unwrap().unwrap();
+}
+
+/// Second écran qui « disparaît » après quelques images.
+struct Unplugged(u32);
+
+impl Capturer for Unplugged {
+    fn display(&self) -> &DisplayInfo {
+        static D: std::sync::OnceLock<DisplayInfo> = std::sync::OnceLock::new();
+        D.get_or_init(|| DisplayInfo {
+            id: 8,
+            name: "second".into(),
+            x: 320,
+            primary: false,
+            ..display()
+        })
+    }
+    fn next_frame(&mut self, _: Duration) -> creamote_capture::Result<Option<Frame>> {
+        std::thread::sleep(Duration::from_millis(5));
+        self.0 += 1;
+        if self.0 > 5 {
+            return Err(creamote_capture::CaptureError::Backend(
+                "écran débranché".into(),
+            ));
+        }
+        Ok(Some(Frame::solid(320, 180, [0, 0, 0, 255])))
+    }
+}
+
+#[tokio::test]
+async fn display_changes_are_announced_and_capture_falls_back_to_primary() {
+    let second = DisplayInfo {
+        id: 8,
+        name: "second".into(),
+        x: 320,
+        primary: false,
+        ..display()
+    };
+    let screens = Arc::new(Mutex::new(vec![display(), second]));
+    let media = {
+        let screens = screens.clone();
+        Media {
+            displays: Arc::new(move || Ok(screens.lock().unwrap().clone())),
+            capturer: Arc::new(|id| {
+                Ok(match id {
+                    Some(8) => Box::new(Unplugged(0)) as Box<dyn Capturer>,
+                    _ => Box::new(Synthetic(0)),
+                })
+            }),
+            injector: Arc::new(|_| Ok(Box::new(Spy(Log::default())) as Box<dyn InputSink>)),
+            encoder: Preference::Software,
+        }
+    };
+    let (a, b) = tokio::io::duplex(1 << 20);
+    let (v_id, h_id) = (DeviceIdentity::generate(), DeviceIdentity::generate());
+    let (v, h) = tokio::join!(
+        SecureChannel::initiate(a, &v_id),
+        SecureChannel::respond(b, &h_id)
+    );
+    let (htx, hrx) = h.unwrap().split();
+    let policy = Policy {
+        allowed: Permissions::ALL,
+        consent: None,
+        user_email: None,
+    };
+    let host = tokio::spawn(host::serve(htx, hrx, policy, media));
+    let (vtx, vrx) = v.unwrap().split();
+    let (handle, mut events) = viewer::start(vtx, vrx, Options::default());
+
+    let Event::Accepted { displays, .. } = next(&mut events).await else {
+        panic!("Accepted attendu");
+    };
+    assert_eq!(displays.len(), 2);
+    handle.select_display(8, 30, 0).await.unwrap();
+
+    // Le flux passe sur l'écran 8, puis revient sur l'écran principal
+    // quand la capture échoue ; la liste des écrans est renvoyée quand
+    // l'écran disparaît de la configuration.
+    let mut seen_second = false;
+    let mut back_to_primary = false;
+    let mut announced = false;
+    let start = Instant::now();
+    while !(back_to_primary && announced) {
+        assert!(start.elapsed() < Duration::from_secs(15), "délai dépassé");
+        match next(&mut events).await {
+            Event::Video(c) if c.display_id == 8 => {
+                seen_second = true;
+                screens.lock().unwrap().truncate(1);
+            }
+            Event::Video(c) if seen_second && c.display_id == 7 => back_to_primary = true,
+            Event::Displays(d) => {
+                assert_eq!(d.len(), 1);
+                announced = true;
+            }
+            Event::Frame(f) => handle.ack(f.frame_id).await.unwrap(),
+            Event::Ended { reason, message } => panic!("fin inattendue : {reason:?} {message}"),
+            _ => {}
+        }
+    }
     handle.close().await;
     host.await.unwrap().unwrap();
 }
