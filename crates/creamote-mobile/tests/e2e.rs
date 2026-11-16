@@ -15,9 +15,12 @@ use creamote_server::{Config, Policy, Server};
 
 fn temp_dir(label: &str) -> std::path::PathBuf {
     let d = std::env::temp_dir().join(format!(
-        "creamote-mobile-{label}-{}-{:?}",
+        "creamote-mobile-{label}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     std::fs::create_dir_all(&d).unwrap();
     d

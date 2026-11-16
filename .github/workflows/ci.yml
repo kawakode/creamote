@@ -120,10 +120,9 @@ jobs:
       - name: liaisons Kotlin sur la JVM (cœur compilé pour l'hôte, vrai serveur)
         working-directory: android
         run: ./gradlew -p jvm-tests test
+      # cargo-ndk trouve le NDK du runner par ANDROID_NDK_ROOT.
       - name: AAR du cœur (arm64-v8a, armeabi-v7a, x86_64)
         working-directory: android
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
         run: ./gradlew :core:assembleRelease
 
   postgres:

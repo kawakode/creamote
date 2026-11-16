@@ -39,7 +39,8 @@ class BindingsTest {
             if (line.startsWith("Écoute")) address = line.substringAfter(": ").substringBefore(" ")
             if (line.startsWith("Empreinte")) pin = line.substringAfter(": ").trim()
         }
-        thread(isDaemon = true) { lines.forEachLine { } }
+        // Vide la sortie du serveur ; le flux se ferme à son arrêt.
+        thread(isDaemon = true) { runCatching { lines.forEachLine { } } }
         serverConfig = ServerConfig(address, pin)
     }
 
