@@ -7,6 +7,9 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 
 use creamote_net::secure::{SecureReceiver, SecureSender};
+use creamote_transfer::files::FilesHandle;
+
+use crate::sharing::{Active, Sharing};
 
 use crate::{
     DEFAULT_FPS, EndReason, Reassembler, Result, SessionError, VideoFrame, from_proto, recv, send,
@@ -46,6 +49,9 @@ pub enum Event {
     Video(pb::VideoConfig),
     /// Image complète ; à acquitter avec [`Handle::ack`] une fois décodée.
     Frame(VideoFrame),
+    /// Transfert de fichiers accordé : envois vers le host et réponses aux
+    /// propositions (voir [`crate::FilesConfig::events`]).
+    Files(FilesHandle),
     /// Fin de session annoncée par le host.
     Ended { reason: EndReason, message: String },
 }
@@ -115,14 +121,30 @@ impl Handle {
 /// l'acceptation, demande le flux de l'écran principal, puis relaie les
 /// événements jusqu'à la fin.
 pub fn start<R, W>(
-    mut tx: SecureSender<W>,
-    mut rx: SecureReceiver<R>,
+    tx: SecureSender<W>,
+    rx: SecureReceiver<R>,
     opts: Options,
 ) -> (Handle, mpsc::Receiver<Event>)
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    start_with(tx, rx, opts, Sharing::default())
+}
+
+/// Comme [`start`], avec le presse-papier et les fichiers offerts par ce
+/// côté ; les permissions correspondantes sont ajoutées à la demande.
+pub fn start_with<R, W>(
+    mut tx: SecureSender<W>,
+    mut rx: SecureReceiver<R>,
+    mut opts: Options,
+    sharing: Sharing,
+) -> (Handle, mpsc::Receiver<Event>)
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    opts.requested = opts.requested | sharing.permissions();
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<Kind>(256);
     let (ev_tx, ev_rx) = mpsc::channel::<Event>(16);
     let handle = Handle { tx: cmd_tx };
@@ -146,7 +168,7 @@ where
 
     let commands = handle.clone();
     tokio::spawn(async move {
-        let r = read_loop(&mut rx, &commands, &ev_tx, &opts).await;
+        let r = read_loop(&mut rx, &commands, &ev_tx, &opts, sharing).await;
         let (reason, message) = match r {
             Ok(Some(end)) => end,
             Ok(None) => (EndReason::Closed, "le host a fermé la session".into()),
@@ -162,12 +184,29 @@ async fn read_loop<R: AsyncRead + Unpin>(
     commands: &Handle,
     events: &mpsc::Sender<Event>,
     opts: &Options,
+    sharing: Sharing,
 ) -> Result<Option<(EndReason, String)>> {
     let mut frames = Reassembler::default();
+    let mut sharing = Some(sharing);
+    let mut active: Option<Active> = None;
+    // Annoncé juste après `Accepted`.
+    let mut announce = None;
     while let Some(kind) = recv(rx).await? {
+        let kind = match &mut active {
+            Some(a) => match a.handle(kind).await {
+                Some(k) => k,
+                None => continue,
+            },
+            None => kind,
+        };
         let ev = match kind {
             Kind::HelloAck(ack) => {
                 let granted = from_proto(ack.granted.as_ref());
+                if let Some(s) = sharing.take() {
+                    let a = Active::start(s, granted, commands.tx.clone());
+                    announce = a.files();
+                    active = Some(a);
+                }
                 let display = ack
                     .displays
                     .iter()
@@ -193,7 +232,13 @@ async fn read_loop<R: AsyncRead + Unpin>(
             }
             _ => continue,
         };
-        if events.send(ev).await.is_err() {
+        let files = announce.take().map(Event::Files);
+        if events.send(ev).await.is_err()
+            || match files {
+                Some(f) => events.send(f).await.is_err(),
+                None => false,
+            }
+        {
             // Plus personne n'écoute : fin de session.
             commands.close().await;
             return Ok(None);

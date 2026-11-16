@@ -11,9 +11,11 @@ use creamote_input::Pointer;
 use creamote_net::secure::SecureChannel;
 use creamote_proto::permissions::Permissions;
 use creamote_proto::session::v1::PointerEvent;
+use creamote_session::creamote_transfer::clipboard::{ClipboardContent, MemoryClipboard};
+use creamote_session::creamote_transfer::files::{AcceptPolicy, Direction, TransferEvent};
 use creamote_session::host::{self, Consent, ConsentPrompt, InputSink, Media, Policy};
 use creamote_session::viewer::{self, Event, Options};
-use creamote_session::{EndReason, SessionError};
+use creamote_session::{EndReason, FilesConfig, SessionError, Sharing};
 
 fn display() -> DisplayInfo {
     DisplayInfo {
@@ -79,6 +81,19 @@ async fn session(
     tokio::sync::mpsc::Receiver<Event>,
     tokio::task::JoinHandle<creamote_session::Result<host::Summary>>,
 ) {
+    session_sharing(policy, log, Sharing::default(), Sharing::default()).await
+}
+
+async fn session_sharing(
+    policy: Policy,
+    log: Log,
+    host_sharing: Sharing,
+    viewer_sharing: Sharing,
+) -> (
+    viewer::Handle,
+    tokio::sync::mpsc::Receiver<Event>,
+    tokio::task::JoinHandle<creamote_session::Result<host::Summary>>,
+) {
     let (a, b) = tokio::io::duplex(1 << 20);
     let v_id = DeviceIdentity::generate();
     let h_id = DeviceIdentity::generate();
@@ -87,13 +102,13 @@ async fn session(
         SecureChannel::respond(b, &h_id)
     );
     let (htx, hrx) = h.unwrap().split();
-    let host = tokio::spawn(host::serve(htx, hrx, policy, media(log)));
+    let host = tokio::spawn(host::serve_with(htx, hrx, policy, media(log), host_sharing));
     let (vtx, vrx) = v.unwrap().split();
     let opts = Options {
         display_name: "Test".into(),
         ..Default::default()
     };
-    let (handle, events) = viewer::start(vtx, vrx, opts);
+    let (handle, events) = viewer::start_with(vtx, vrx, opts, viewer_sharing);
     (handle, events, host)
 }
 
@@ -251,6 +266,146 @@ async fn ticket_without_view_is_refused_and_unattended_skips_consent() {
         panic!("Accepted attendu");
     };
     assert_eq!(granted, Permissions::VIEW);
+    handle.close().await;
+    host.await.unwrap().unwrap();
+}
+
+fn temp_dir(label: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("creamote-session-{}-{label}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn text(t: &str) -> ClipboardContent {
+    ClipboardContent {
+        text: Some(t.into()),
+        ..Default::default()
+    }
+}
+
+async fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
+    let start = Instant::now();
+    while !cond() {
+        assert!(start.elapsed() < Duration::from_secs(10), "{what}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn clipboard_and_files_are_shared_when_granted() {
+    let host_clip = MemoryClipboard::default();
+    let viewer_clip = MemoryClipboard::default();
+    let host_dir = temp_dir("host");
+    let viewer_dir = temp_dir("viewer");
+    let (host_ev_tx, mut host_events) = tokio::sync::mpsc::unbounded_channel();
+    let host_sharing = Sharing {
+        clipboard: Some(Box::new(host_clip.clone())),
+        files: Some(FilesConfig {
+            dest: host_dir.clone(),
+            policy: AcceptPolicy::AcceptAll,
+            events: Some(host_ev_tx),
+        }),
+    };
+    let viewer_sharing = Sharing {
+        clipboard: Some(Box::new(viewer_clip.clone())),
+        files: Some(FilesConfig {
+            dest: viewer_dir.clone(),
+            policy: AcceptPolicy::AcceptAll,
+            events: None,
+        }),
+    };
+    let policy = Policy {
+        allowed: Permissions::ALL,
+        consent: Some(prompt(Consent::Control, Arc::default())),
+        user_email: None,
+    };
+    let (handle, mut events, host) =
+        session_sharing(policy, Log::default(), host_sharing, viewer_sharing).await;
+
+    let Event::Accepted { granted, .. } = next(&mut events).await else {
+        panic!("Accepted attendu");
+    };
+    assert_eq!(
+        granted,
+        Permissions::VIEW
+            | Permissions::CONTROL
+            | Permissions::CLIPBOARD
+            | Permissions::FILE_TRANSFER
+    );
+    let files = loop {
+        match next(&mut events).await {
+            Event::Files(f) => break f,
+            Event::Frame(f) => handle.ack(f.frame_id).await.unwrap(),
+            _ => {}
+        }
+    };
+    // Laisse les deux surveillances relever le presse-papier initial.
+    tokio::time::sleep(Duration::from_millis(700)).await;
+
+    // Copie chez le viewer → presse-papier du host, et inversement.
+    *viewer_clip.0.lock().unwrap() = text("du viewer");
+    wait_for("copie viewer → host", || {
+        *host_clip.0.lock().unwrap() == text("du viewer")
+    })
+    .await;
+    *host_clip.0.lock().unwrap() = text("du host");
+    wait_for("copie host → viewer", || {
+        *viewer_clip.0.lock().unwrap() == text("du host")
+    })
+    .await;
+
+    // Fichier du viewer vers le host.
+    let src = viewer_dir.join("rapport.txt");
+    std::fs::write(&src, b"contenu").unwrap();
+    files.send_file(&src, "rapport.txt").await.unwrap();
+    let received = loop {
+        let ev = tokio::time::timeout(Duration::from_secs(10), host_events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        if let TransferEvent::Completed {
+            direction: Direction::Receive,
+            path,
+            ..
+        } = ev
+        {
+            break path;
+        }
+    };
+    assert_eq!(std::fs::read(received).unwrap(), b"contenu");
+
+    handle.close().await;
+    host.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn view_only_consent_disables_sharing() {
+    let host_clip = MemoryClipboard::default();
+    let viewer_clip = MemoryClipboard::default();
+    let policy = Policy {
+        allowed: Permissions::ALL,
+        consent: Some(prompt(Consent::ViewOnly, Arc::default())),
+        user_email: None,
+    };
+    let host_sharing = Sharing {
+        clipboard: Some(Box::new(host_clip.clone())),
+        files: None,
+    };
+    let viewer_sharing = Sharing {
+        clipboard: Some(Box::new(viewer_clip.clone())),
+        files: None,
+    };
+    let (handle, mut events, host) =
+        session_sharing(policy, Log::default(), host_sharing, viewer_sharing).await;
+    let Event::Accepted { granted, .. } = next(&mut events).await else {
+        panic!("Accepted attendu");
+    };
+    assert_eq!(granted, Permissions::VIEW);
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    *viewer_clip.0.lock().unwrap() = text("secret");
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(*host_clip.0.lock().unwrap(), ClipboardContent::default());
     handle.close().await;
     host.await.unwrap().unwrap();
 }

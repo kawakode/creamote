@@ -73,6 +73,93 @@ message VideoConfig {
   string encoder = 7;
 }
 
+// ---------------------------------------------------------------------------
+// Presse-papier (M3). Chaque copie d'un côté est envoyée à l'autre, découpée
+// en morceaux (un message chiffré fait au plus 64 Kio). Une copie peut porter
+// plusieurs formats ; ils sont envoyés l'un après l'autre avec le même
+// `sequence`, le dernier morceau du dernier format porte `end_of_update`.
+// Permission `clipboard` requise.
+
+enum ClipboardFormat {
+  CLIPBOARD_FORMAT_UNSPECIFIED = 0;
+  // Texte UTF-8.
+  CLIPBOARD_FORMAT_TEXT = 1;
+  // Fragment HTML (UTF-8), accompagné en général du texte brut.
+  CLIPBOARD_FORMAT_HTML = 2;
+  // Image encodée en PNG.
+  CLIPBOARD_FORMAT_PNG = 3;
+}
+
+message ClipboardChunk {
+  uint64 sequence = 1;
+  ClipboardFormat format = 2;
+  // Taille totale de ce format, en octets.
+  uint64 total_size = 3;
+  uint64 offset = 4;
+  bytes data = 5;
+  bool end_of_update = 6;
+}
+
+// ---------------------------------------------------------------------------
+// Transfert de fichiers (M3), dans les deux sens. L'émetteur propose chaque
+// fichier (`FileOffer`), le destinataire accepte ou refuse (`FileAnswer`).
+// Les morceaux (`FileChunk`) sont envoyés dans une fenêtre que le
+// destinataire fait avancer (`FileAck`). `FileEnd` porte l'empreinte BLAKE3
+// du fichier, vérifiée avant que le destinataire ne confirme (`FileResult`).
+// Permission `file_transfer` requise.
+
+message FileOffer {
+  // Choisi par l'émetteur, unique dans la session pour ce sens.
+  uint64 transfer_id = 1;
+  // Chemin relatif, séparateur « / » (un dossier envoyé est décomposé en
+  // fichiers). Jamais absolu ni contenant « .. ».
+  string path = 2;
+  uint64 size = 3;
+  // Date de modification, millisecondes Unix (0 = inconnue).
+  int64 modified_unix_ms = 4;
+}
+
+message FileAnswer {
+  uint64 transfer_id = 1;
+  bool accepted = 2;
+  // Motif du refus, lisible.
+  string reason = 3;
+}
+
+message FileChunk {
+  uint64 transfer_id = 1;
+  uint64 offset = 2;
+  bytes data = 3;
+}
+
+message FileAck {
+  uint64 transfer_id = 1;
+  // Octets reçus et écrits.
+  uint64 received = 2;
+}
+
+message FileEnd {
+  uint64 transfer_id = 1;
+  // BLAKE3 du contenu (32 octets).
+  bytes blake3 = 2;
+}
+
+// Annulation par l'un ou l'autre côté.
+message FileCancel {
+  uint64 transfer_id = 1;
+  string reason = 2;
+  // Annulé par l'émetteur du fichier : `transfer_id` est l'un de ses
+  // identifiants. Sinon, par le destinataire.
+  bool by_sender = 3;
+}
+
+message FileResult {
+  uint64 transfer_id = 1;
+  bool ok = 2;
+  string error = 3;
+}
+
+
 // Morceau d'une image encodée (host → viewer). Une image dépasse souvent la
 // taille maximale d'un message Noise : elle est découpée en morceaux
 // consécutifs, `chunk_index` de 0 à `chunk_count - 1`. H.264 au format Annex B,
@@ -133,5 +220,13 @@ message SessionMessage {
     FrameAck frame_ack = 8;
     KeyframeRequest keyframe_request = 9;
     SessionEnd end = 10;
+    ClipboardChunk clipboard_chunk = 20;
+    FileOffer file_offer = 21;
+    FileAnswer file_answer = 22;
+    FileChunk file_chunk = 23;
+    FileAck file_ack = 24;
+    FileEnd file_end = 25;
+    FileCancel file_cancel = 26;
+    FileResult file_result = 27;
   }
 }

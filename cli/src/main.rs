@@ -20,7 +20,10 @@ use creamote_net::secure::SecureChannel;
 use creamote_net::stream::PeerPath;
 use creamote_net::tls::ServerPin;
 use creamote_proto::permissions::Permissions;
+use creamote_session::creamote_transfer::clipboard::{ClipboardBackend, NativeClipboard};
+use creamote_session::creamote_transfer::files::{AcceptPolicy, Direction, TransferEvent};
 use creamote_session::viewer::{self, Event};
+use creamote_session::{FilesConfig, Sharing};
 use std::io::Write;
 
 #[derive(Parser)]
@@ -71,6 +74,16 @@ enum Command {
         /// au host) : la session passe par le relay.
         #[arg(long)]
         relay_only: bool,
+        /// Partage le presse-papier de cette machine avec le host.
+        #[arg(long)]
+        clipboard: bool,
+        /// Envoie ce fichier ou dossier au host une fois la session acceptée
+        /// (option répétable).
+        #[arg(long)]
+        send: Vec<PathBuf>,
+        /// Accepte les fichiers envoyés par le host dans ce dossier.
+        #[arg(long)]
+        files_dir: Option<PathBuf>,
     },
     /// Ouvre une session d'API et affiche le jeton (mot de passe lu sur
     /// l'entrée standard).
@@ -158,6 +171,9 @@ async fn main() -> anyhow::Result<()> {
             view_only,
             fps,
             relay_only,
+            clipboard,
+            send,
+            files_dir,
         } => {
             let target = DeviceId::parse(&target).context("ID invalide (9 chiffres attendus)")?;
             let addr = tokio::net::lookup_host(&server)
@@ -222,8 +238,25 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 Permissions::VIEW | Permissions::CONTROL
             };
+            let (transfer_tx, mut transfers) = tokio::sync::mpsc::unbounded_channel();
+            let sharing = Sharing {
+                clipboard: if clipboard {
+                    Some(Box::new(NativeClipboard::new()?) as Box<dyn ClipboardBackend>)
+                } else {
+                    None
+                },
+                files: (files_dir.is_some() || !send.is_empty()).then(|| FilesConfig {
+                    dest: files_dir.clone().unwrap_or_else(|| PathBuf::from(".")),
+                    policy: if files_dir.is_some() {
+                        AcceptPolicy::AcceptAll
+                    } else {
+                        AcceptPolicy::RejectAll
+                    },
+                    events: Some(transfer_tx),
+                }),
+            };
             let (tx, rx) = chan.split();
-            let (handle, mut events) = viewer::start(
+            let (handle, mut events) = viewer::start_with(
                 tx,
                 rx,
                 viewer::Options {
@@ -232,6 +265,7 @@ async fn main() -> anyhow::Result<()> {
                     max_fps: fps,
                     bitrate_bps: 0,
                 },
+                sharing,
             );
             let mut out = match &record {
                 Some(p) => Some(std::io::BufWriter::new(std::fs::File::create(p)?)),
@@ -244,6 +278,22 @@ async fn main() -> anyhow::Result<()> {
             loop {
                 let ev = tokio::select! {
                     ev = events.recv() => ev,
+                    Some(t) = transfers.recv() => {
+                        match t {
+                            TransferEvent::Completed { direction, path, .. } => {
+                                let verb = match direction {
+                                    Direction::Send => "envoyé",
+                                    Direction::Receive => "reçu",
+                                };
+                                println!("Fichier {verb} : {}", path.display());
+                            }
+                            TransferEvent::Failed { reason, .. } => {
+                                println!("Transfert échoué : {reason}");
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
                     _ = tokio::signal::ctrl_c() => None,
                     _ = async {
                         match deadline {
@@ -280,6 +330,18 @@ async fn main() -> anyhow::Result<()> {
                                 "{frames} images, {:.0} kbit/s en moyenne",
                                 bytes as f64 * 8.0 / secs / 1000.0
                             );
+                        }
+                    }
+                    Some(Event::Files(files)) => {
+                        for p in &send {
+                            match files.send_path(p).await {
+                                Ok(ids) => println!(
+                                    "{} : {} fichier(s) proposé(s)",
+                                    p.display(),
+                                    ids.len()
+                                ),
+                                Err(e) => println!("{} : {e}", p.display()),
+                            }
                         }
                     }
                     Some(Event::Ended { reason, message }) => {

@@ -29,6 +29,13 @@ Détails et alternatives dans [ADR 0003](adr/0003-p2p.md).
 - **Quotas** : les limites du serveur public ne portent que sur le relay. Si le relay est plein ou le quota de l'IP atteint, la session est quand même proposée en direct seul (`relay_unavailable`), et l'erreur n'est remontée que si le direct échoue.
 - **Limites connues** : NAT symétriques (port différent par destination) → relay. Un NAT qui crée un état conntrack pour un paquet entrant non sollicité au lieu de le jeter peut décaler le port ; les box usuelles jettent ce trafic. `tools/nat-lab.sh` rejoue ces cas en CI.
 
+## Presse-papier et fichiers (M3)
+
+Crate `creamote-transfer`, dans le canal Noise, avec les numéros 20 à 39 de `SessionMessage`. Branchée dans `creamote-session` (`Sharing`, `host::serve_with`, `viewer::start_with`) : chaque côté choisit ce qu'il offre, le host n'accorde `clipboard` et `file_transfer` que s'il les offre et que le ticket ou l'utilisateur présent les autorise (« vue seule » les retire), et ignore les messages d'une fonction non accordée.
+
+- **Presse-papier** : texte, HTML et image (PNG), 16 Mio par format, découpés en morceaux de 48 Kio. Accès natif via `arboard` (Win32, NSPasteboard, sélections X11, data-control Wayland) ; détection des copies par `GetClipboardSequenceNumber` sous Windows, par relecture toutes les 500 ms ailleurs. Le contenu présent à l'ouverture de la session n'est pas envoyé, et une copie reçue n'est jamais renvoyée.
+- **Fichiers** : dans les deux sens, un fichier par proposition (`FileOffer`), dossiers décomposés en chemins relatifs. Acceptation automatique, à la demande ou refus. Fenêtre de 4 Mio contrôlée par accusés de réception, empreinte BLAKE3 vérifiée avant de renommer `*.creamote-part`. Chemins reçus validés pour toutes les plateformes (ni absolu, ni `..`, ni nom réservé Windows), aucun fichier existant écrasé, date de modification conservée.
+
 ## Serveur officiel et serveurs custom
 
 Un seul binaire `creamote-server`. En mode `public` il applique une `ServerPolicy` (au relay seulement, une connexion directe ne coûtant rien au serveur) : **une session relay à la fois par adresse IP du demandeur**, **10 minutes maximum par session** et 200 sessions au total, valeurs réglables. Le serveur officiel n'offre pas la gestion de parc (comptes, entités, RBAC) : elle est réservée aux serveurs auto-hébergés. Le plafond de débit et la limitation de l'enregistrement d'IDs arrivent en M6. Client et host conservent une liste de serveurs, chacun épinglé par son empreinte.

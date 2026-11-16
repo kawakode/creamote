@@ -4,6 +4,8 @@
 //!   l'utilisateur présent, diffuse l'écran (capture → H.264) et injecte les
 //!   entrées autorisées.
 //! - [`viewer`] : ouvre la session, reçoit la vidéo, envoie clavier et souris.
+//! - [`sharing`] : presse-papier partagé et transfert de fichiers (M3),
+//!   activés par chaque côté et accordés par le host.
 //!
 //! Flux : voir `proto/creamote/session.proto`. Les images encodées sont
 //! découpées en [`VideoChunk`](creamote_proto::session::v1::VideoChunk) ; le
@@ -18,7 +20,11 @@ use prost::Message;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 pub mod host;
+pub mod sharing;
 pub mod viewer;
+
+pub use creamote_transfer;
+pub use sharing::{FilesConfig, Sharing};
 
 pub use pb::session_end::Reason as EndReason;
 
