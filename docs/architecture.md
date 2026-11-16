@@ -19,7 +19,7 @@ Vue d'ensemble ; les décisions détaillées sont dans `docs/adr/`.
 
 ## Connexion directe (M3)
 
-Détails et alternatives dans [ADR 0002](adr/0002-p2p.md).
+Détails et alternatives dans [ADR 0003](adr/0003-p2p.md).
 
 - **Un seul endpoint QUIC par pair** pour le rendezvous, le direct et le relay : l'adresse publique que le serveur observe à l'enregistrement est la correspondance NAT qui servira au hole punching.
 - **Candidats** : le pair annonce ses adresses LAN (`RegisterPeer.local_addrs`, énumérées par l'OS : `getifaddrs`, `GetAdaptersAddresses`) ; le serveur les transmet, précédées de l'adresse observée, dans le `RelayGrant` de l'autre pair (au plus 8).
