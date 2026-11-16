@@ -10,6 +10,14 @@
 //!
 //! En mode public (serveur officiel), la [`Policy`] limite le nombre de
 //! sessions relay simultanées et leur durée.
+//!
+//! La gestion de parc (comptes, entités, parcs, RBAC) est exposée par une API
+//! HTTP ([`api`]) adossée à la base de données ([`db`]).
+
+pub mod api;
+pub mod auth;
+pub mod db;
+pub mod rbac;
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -98,6 +106,11 @@ pub struct Config {
     /// Adresse du relay annoncée aux pairs ; `None` = celle du rendezvous.
     pub relay_addr: Option<String>,
     pub policy: Policy,
+    /// Base de la gestion de parc ; `None` = pas de gestion de parc (cas du
+    /// serveur officiel).
+    pub database_url: Option<String>,
+    /// Adresse d'écoute HTTP de l'API de gestion (exige `database_url`).
+    pub api_listen: Option<SocketAddr>,
 }
 
 /// Serveur démarré.
@@ -105,6 +118,8 @@ pub struct Server {
     endpoint: quinn::Endpoint,
     pin: ServerPin,
     task: JoinHandle<()>,
+    api: Option<(SocketAddr, JoinHandle<()>)>,
+    db: Option<db::Db>,
 }
 
 impl Server {
@@ -114,6 +129,25 @@ impl Server {
             None => ServerCert::generate()?,
         };
         let pin = cert.pin();
+        let db = match &config.database_url {
+            Some(url) => Some(db::Db::connect(url).await?),
+            None => None,
+        };
+        let api = match (config.api_listen, &db) {
+            (Some(addr), Some(db)) => {
+                let listener = tokio::net::TcpListener::bind(addr).await?;
+                let local = listener.local_addr()?;
+                let app = api::router(db.clone());
+                let task = tokio::spawn(async move {
+                    if let Err(e) = axum::serve(listener, app).await {
+                        tracing::error!("API HTTP arrêtée : {e}");
+                    }
+                });
+                Some((local, task))
+            }
+            (Some(_), None) => anyhow::bail!("l'API de gestion exige une base de données"),
+            _ => None,
+        };
         let endpoint = quinn::Endpoint::server(cert.quic_server_config()?, config.listen)?;
 
         let permits = (config.policy.max_relay_sessions > 0)
@@ -144,7 +178,18 @@ impl Server {
             endpoint,
             pin,
             task,
+            api,
+            db,
         })
+    }
+
+    /// Adresse de l'API HTTP, si elle est active.
+    pub fn api_addr(&self) -> Option<SocketAddr> {
+        self.api.as_ref().map(|(a, _)| *a)
+    }
+
+    pub fn db(&self) -> Option<&db::Db> {
+        self.db.as_ref()
     }
 
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
@@ -159,6 +204,9 @@ impl Server {
     pub async fn shutdown(self) {
         self.endpoint.close(0u32.into(), b"arret");
         self.task.abort();
+        if let Some((_, task)) = self.api {
+            task.abort();
+        }
         self.endpoint.wait_idle().await;
     }
 }

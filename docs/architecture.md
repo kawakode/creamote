@@ -23,6 +23,8 @@ Un seul binaire `creamote-server`. En mode `public` il applique une `ServerPolic
 
 ## Gestion de parc (M4)
 
+Disponible sur les serveurs auto-hébergés (pas sur le serveur officiel). Données en SQLite par défaut ou PostgreSQL, API HTTP décrite dans [api.md](api.md).
+
 Un rôle (ensemble de permissions) est attribué à un utilisateur ou un groupe de sécurité sur une portée : entité, parc (imbricable) ou machine, avec héritage vers le bas. Le serveur évalue les droits à la demande de connexion et émet un **ticket de session signé** ; le host, qui a épinglé la clé du serveur à l'enrôlement, n'applique que les permissions du ticket.
 
 ## Milestones

@@ -12,5 +12,5 @@ RUN useradd --system --uid 10001 --home-dir /data creamote \
 COPY --from=build /src/target/release/creamote-server /usr/local/bin/creamote-server
 USER creamote
 VOLUME ["/data"]
-EXPOSE 21400/udp
-ENTRYPOINT ["creamote-server", "--listen", "0.0.0.0:21400", "--data-dir", "/data"]
+EXPOSE 21400/udp 21401/tcp
+ENTRYPOINT ["creamote-server", "--listen", "0.0.0.0:21400", "--data-dir", "/data", "--api-listen", "0.0.0.0:21401"]

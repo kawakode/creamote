@@ -9,9 +9,15 @@ services:
     restart: unless-stopped
     ports:
       - "21400:21400/udp"
+      # API de gestion en HTTP clair : publiée sur la machine hôte uniquement,
+      # à exposer via un reverse proxy TLS.
+      - "127.0.0.1:21401:21401"
     volumes:
       - creamote-data:/data
-    # Pour un serveur public (limites de sessions relay) :
+    # Base PostgreSQL au lieu de SQLite :
+    # environment:
+    #   CREAMOTE_DATABASE_URL: postgres://creamote:motdepasse@postgres/creamote
+    # Pour un serveur public (limites de sessions relay, sans gestion de parc) :
     # command: ["--public", "--max-relay-sessions-per-ip", "1", "--max-relay-seconds", "600"]
 
 volumes:
