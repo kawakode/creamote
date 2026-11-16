@@ -14,7 +14,7 @@ use pb::session_message::Kind;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 
-use crate::rate::RateController;
+use crate::rate::{MIN_BITRATE, RateController};
 use crate::sharing::{Active, Sharing};
 use crate::{
     DEFAULT_FPS, EndReason, MAX_FRAMES_IN_FLIGHT, Result, SessionError, chunks, from_proto,
@@ -95,6 +95,9 @@ pub struct Media {
     pub capturer: Arc<CapturerFn>,
     pub injector: Arc<InjectorFn>,
     pub encoder: Preference,
+    /// Plafond du débit vidéo en bit/s, 0 = aucun (ex. : plafond du relay
+    /// public quand la session passe par lui).
+    pub max_bitrate_bps: u32,
 }
 
 impl Media {
@@ -109,6 +112,7 @@ impl Media {
                     .map_err(|e| e.to_string())
             }),
             encoder,
+            max_bitrate_bps: 0,
         }
     }
 }
@@ -520,6 +524,9 @@ fn video_loop(
             let mut cfg = EncoderConfig::for_size(w, h, fps);
             if req.target_bitrate_bps > 0 {
                 cfg.bitrate_bps = req.target_bitrate_bps.clamp(200_000, 50_000_000);
+            }
+            if media.max_bitrate_bps > 0 {
+                cfg.bitrate_bps = cfg.bitrate_bps.min(media.max_bitrate_bps.max(MIN_BITRATE));
             }
             let e = creamote_codec::open_h264(cfg, media.encoder).map_err(|e| e.to_string())?;
             let config = pb::VideoConfig {

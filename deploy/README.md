@@ -40,4 +40,6 @@ docker compose -f deploy/docker-compose.yml run --rm -T creamote-server user-add
 
 Connectez-vous ensuite à la console avec ce compte. Voir [docs/api.md](../docs/api.md) pour l'API.
 
-Options utiles : `--relay-addr` (adresse publique annoncée pour le relay), `--public` (mode serveur officiel : une session relay à la fois par IP, 10 min par session, 200 sessions au total), `--max-relay-sessions`, `--max-relay-sessions-per-ip`, `--max-relay-seconds`.
+Options utiles : `--relay-addr` (adresse publique annoncée pour le relay), `--metrics-listen 127.0.0.1:21402` (métriques Prometheus sur `/metrics`), `--max-relay-sessions`, `--max-relay-sessions-per-ip`, `--max-relay-seconds`, `--max-relay-kbps` (limites du relay, illimitées par défaut sur un serveur auto-hébergé).
+
+Serveur public (`--public`, sans gestion de parc, avec limites par IP) : voir [official/README.md](official/README.md).
