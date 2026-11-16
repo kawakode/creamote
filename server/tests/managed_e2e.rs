@@ -105,7 +105,8 @@ fn unhex(s: &str) -> Vec<u8> {
         .collect()
 }
 
-/// Host géré : n'accepte que les offres que `ticket::decide` valide.
+/// Host géré sans utilisateur présent : n'accepte que les offres que
+/// `ticket::decide` valide sans consentement.
 fn spawn_managed_host(
     mut rv: RendezvousClient,
     identity: Arc<DeviceIdentity>,

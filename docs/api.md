@@ -173,14 +173,16 @@ client le joint à sa demande de connexion ; le host enrôlé le vérifie et
 vérifie que la clé authentifiée par Noise est bien celle du ticket. Un ticket
 volé est donc inutilisable depuis un autre appareil.
 
-En attendant le consentement de l'utilisateur présent (M2), un host enrôlé
-n'accepte que les tickets accordant `view_screen` **et** `unattended`. Un host
-non enrôlé reste en mode développement et accepte toute demande.
+Un host enrôlé exige un ticket accordant au moins `view_screen`. Avec
+`unattended`, la session s'ouvre sans intervention ; sans `unattended`,
+l'utilisateur présent doit l'accepter (contrôle, vue seule ou refus) dans les
+30 secondes. Un host non enrôlé accepte les demandes sans ticket, toujours
+soumises au consentement de l'utilisateur présent.
 
 Avec la CLI :
 
 ```sh
 export CREAMOTE_API_TOKEN=$(echo "$MOT_DE_PASSE" | creamote-cli login --api-url https://creamote.example.org --email moi@example.org)
-creamote-cli connect "012 345 678" --server relay.example.org:21400 --server-pin <empreinte> \
+creamote-cli view "012 345 678" --server relay.example.org:21400 --server-pin <empreinte> \
   --api-url https://creamote.example.org
 ```

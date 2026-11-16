@@ -5,8 +5,9 @@
 //! l'enrôlement), émis pour ce host **et** pour la clé du viewer qui se
 //! présente, encore valide, et accordant les permissions nécessaires.
 //!
-//! Un host non enrôlé reste en mode développement : il accepte toute offre,
-//! sans ticket (le consentement et le mot de passe ponctuel arrivent avec M2).
+//! Un ticket sans `unattended` ouvre une session soumise au consentement de
+//! l'utilisateur présent. Un host non enrôlé accepte les offres sans ticket,
+//! mais chaque session y est soumise au consentement de l'utilisateur présent.
 
 use std::io::Write;
 use std::path::Path;
@@ -109,10 +110,14 @@ pub const UNATTENDED_REQUIRED: Permissions = Permissions::VIEW.union(Permissions
 /// Décision du host sur une offre entrante.
 #[derive(Debug)]
 pub enum Decision {
-    /// Mode développement (host non enrôlé) : pas de ticket.
+    /// Host non enrôlé : pas de ticket ; l'utilisateur présent consent.
     AcceptUnmanaged,
-    /// Ticket valide : session avec ces permissions, pour cet utilisateur.
+    /// Ticket valide accordant `unattended` : session sans consentement,
+    /// avec les permissions du ticket.
     Accept(SessionTicket),
+    /// Ticket valide sans `unattended` : session avec les permissions du
+    /// ticket, si l'utilisateur présent consent.
+    AcceptWithConsent(SessionTicket),
     Decline(TicketError),
 }
 
@@ -127,12 +132,16 @@ pub fn decide(
         return Decision::AcceptUnmanaged;
     };
     match verify(ticket, &e.ticket_key, host, requester, now) {
-        Ok(t) if Permissions::from_bits_truncate(t.permissions).contains(UNATTENDED_REQUIRED) => {
-            Decision::Accept(t)
+        Ok(t) => {
+            let p = Permissions::from_bits_truncate(t.permissions);
+            if p.contains(UNATTENDED_REQUIRED) {
+                Decision::Accept(t)
+            } else if p.contains(Permissions::VIEW) {
+                Decision::AcceptWithConsent(t)
+            } else {
+                Decision::Decline(TicketError::Insufficient(Permissions::VIEW))
+            }
         }
-        // Le consentement de l'utilisateur présent (M2) permettra d'accepter
-        // un ticket sans `unattended`.
-        Ok(_) => Decision::Decline(TicketError::Insufficient(UNATTENDED_REQUIRED)),
         Err(e) => Decision::Decline(e),
     }
 }
@@ -317,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn enrolled_host_requires_ticket_with_unattended() {
+    fn enrolled_host_requires_ticket_and_consent_without_unattended() {
         let s = setup();
         let e = enrollment(&s);
         let d = decide(Some(&e), &[], s.host.public(), s.viewer.public(), 1000);
@@ -326,6 +335,14 @@ mod tests {
         let d = decide(
             Some(&e),
             &ticket(&s, tech, 1000),
+            s.host.public(),
+            s.viewer.public(),
+            1000,
+        );
+        assert!(matches!(d, Decision::AcceptWithConsent(_)));
+        let d = decide(
+            Some(&e),
+            &ticket(&s, Permissions::CONTROL, 1000),
             s.host.public(),
             s.viewer.public(),
             1000,

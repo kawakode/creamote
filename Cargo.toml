@@ -4,10 +4,16 @@ members = [
     "crates/creamote-proto",
     "crates/creamote-crypto",
     "crates/creamote-net",
+    "crates/creamote-capture",
+    "crates/creamote-codec",
+    "crates/creamote-input",
+    "crates/creamote-session",
     "server",
     "host",
     "cli",
 ]
+# Le client Tauri a son propre workspace (dépendances système WebView).
+exclude = ["client"]
 
 [workspace.package]
 version = "0.1.0"
@@ -22,6 +28,10 @@ creamote-proto = { path = "crates/creamote-proto" }
 creamote-crypto = { path = "crates/creamote-crypto" }
 creamote-net = { path = "crates/creamote-net" }
 creamote-server = { path = "server" }
+creamote-capture = { path = "crates/creamote-capture" }
+creamote-codec = { path = "crates/creamote-codec" }
+creamote-input = { path = "crates/creamote-input" }
+creamote-session = { path = "crates/creamote-session" }
 prost = "0.14"
 prost-build = "0.14"
 protox = "0.10"
@@ -56,6 +66,21 @@ jsonwebtoken = { version = "12", default-features = false, features = ["rust_cry
 sha1 = "0.10"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# Médias (M2) : API natives des OS, openh264 en repli logiciel.
+x11rb = { version = "0.14", features = ["randr", "shm", "xfixes", "xtest", "allow-unsafe-code"] }
+openh264 = "0.9"
+windows = "0.62"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-core-foundation = "0.3"
+objc2-core-graphics = "0.3"
+objc2-core-media = "0.3"
+objc2-core-video = "0.3"
+objc2-screen-capture-kit = "0.3"
+objc2-video-toolbox = "0.3"
+block2 = "0.6"
+dispatch2 = "0.3"
+libc = "0.2"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

@@ -1,8 +1,9 @@
 //! `creamote-cli` : outil de test du protocole.
 //!
-//! `creamote-cli connect <ID> --server <hôte:port> --server-pin <empreinte>`
-//! ouvre une session chiffrée de bout en bout vers un host via le relay, puis
-//! envoie chaque ligne saisie et affiche les réponses (écho du host en M1).
+//! `creamote-cli view <ID> --server <hôte:port> --server-pin <empreinte>`
+//! ouvre une session de bout en bout vers un host via le relay, affiche le
+//! déroulement (consentement, encodeur, images reçues) et peut enregistrer le
+//! flux H.264 brut (`--record flux.h264`, lisible par `ffplay`).
 //!
 //! Pour un host enrôlé dans un parc, ajoutez `--api-url` et `--api-token`
 //! (obtenu avec `creamote-cli login`) : la CLI demande alors un ticket de
@@ -17,7 +18,9 @@ use creamote_net::relay::RelayStream;
 use creamote_net::rendezvous::RendezvousClient;
 use creamote_net::secure::SecureChannel;
 use creamote_net::tls::ServerPin;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use creamote_proto::permissions::Permissions;
+use creamote_session::viewer::{self, Event};
+use std::io::Write;
 
 #[derive(Parser)]
 #[command(version, about = "Outil en ligne de commande Creamote")]
@@ -33,8 +36,9 @@ struct Args {
 enum Command {
     /// Affiche l'ID et l'empreinte de cet appareil.
     Id,
-    /// Ouvre une session chiffrée vers un host.
-    Connect {
+    /// Ouvre une session vers un host et reçoit son écran.
+    #[command(alias = "connect")]
+    View {
         /// ID du host, ex. « 123 456 789 ».
         target: String,
         /// Serveur Creamote, `hôte:port`.
@@ -50,6 +54,18 @@ enum Command {
         /// Jeton d'API (`creamote-cli login`).
         #[arg(long, env = "CREAMOTE_API_TOKEN", hide_env_values = true)]
         api_token: Option<String>,
+        /// Enregistre le flux H.264 (Annex B) dans ce fichier.
+        #[arg(long)]
+        record: Option<PathBuf>,
+        /// Durée de la session en secondes (0 : jusqu'à Ctrl+C).
+        #[arg(long, default_value_t = 0)]
+        seconds: u64,
+        /// Demande seulement la vue, sans le contrôle.
+        #[arg(long)]
+        view_only: bool,
+        /// Cadence maximale demandée.
+        #[arg(long, default_value_t = 30)]
+        fps: u32,
     },
     /// Ouvre une session d'API et affiche le jeton (mot de passe lu sur
     /// l'entrée standard).
@@ -126,12 +142,16 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", body["token"].as_str().context("réponse sans jeton")?);
             Ok(())
         }
-        Command::Connect {
+        Command::View {
             target,
             server,
             server_pin,
             api_url,
             api_token,
+            record,
+            seconds,
+            view_only,
+            fps,
         } => {
             let target = DeviceId::parse(&target).context("ID invalide (9 chiffres attendus)")?;
             let addr = tokio::net::lookup_host(&server)
@@ -160,7 +180,7 @@ async fn main() -> anyhow::Result<()> {
             let grant = rv.request_session_with_ticket(target, ticket).await?;
             let relay = rv.relay_addr(&grant)?;
             let stream = RelayStream::join(relay, server_pin, &grant).await?;
-            let mut chan = SecureChannel::initiate(stream, &identity).await?;
+            let chan = SecureChannel::initiate(stream, &identity).await?;
 
             // Seul Noise fait foi : on vérifie que la clé authentifiée
             // correspond bien à l'ID demandé.
@@ -180,25 +200,88 @@ async fn main() -> anyhow::Result<()> {
                     grant.max_session_seconds / 60
                 );
             }
-            println!("Tapez un message, Ctrl+D pour quitter.");
-
-            let mut lines = BufReader::new(tokio::io::stdin()).lines();
+            println!("En attente de l'accord du host…");
+            let requested = if view_only {
+                Permissions::VIEW
+            } else {
+                Permissions::VIEW | Permissions::CONTROL
+            };
+            let (tx, rx) = chan.split();
+            let (handle, mut events) = viewer::start(
+                tx,
+                rx,
+                viewer::Options {
+                    display_name: "creamote-cli".into(),
+                    requested,
+                    max_fps: fps,
+                    bitrate_bps: 0,
+                },
+            );
+            let mut out = match &record {
+                Some(p) => Some(std::io::BufWriter::new(std::fs::File::create(p)?)),
+                None => None,
+            };
+            let deadline = (seconds > 0)
+                .then(|| tokio::time::Instant::now() + std::time::Duration::from_secs(seconds));
+            let (mut frames, mut bytes) = (0u64, 0u64);
+            let started = std::time::Instant::now();
             loop {
-                tokio::select! {
-                    line = lines.next_line() => match line? {
-                        Some(l) => chan.send(l.as_bytes()).await?,
-                        None => break,
-                    },
-                    msg = chan.recv() => match msg? {
-                        Some(m) => println!("{}", String::from_utf8_lossy(&m)),
-                        None => {
-                            println!("Le host a fermé la session.");
-                            return Ok(());
+                let ev = tokio::select! {
+                    ev = events.recv() => ev,
+                    _ = tokio::signal::ctrl_c() => None,
+                    _ = async {
+                        match deadline {
+                            Some(d) => tokio::time::sleep_until(d).await,
+                            None => std::future::pending().await,
                         }
-                    },
+                    } => None,
+                };
+                match ev {
+                    Some(Event::Accepted { granted, displays }) => {
+                        println!("Session acceptée, permissions {granted:?}.");
+                        for d in displays {
+                            println!("  écran {} « {} » {}×{}", d.id, d.name, d.width, d.height);
+                        }
+                    }
+                    Some(Event::Video(c)) => println!(
+                        "Flux : {}×{} à {} i/s, {} kbit/s, encodeur {}",
+                        c.width,
+                        c.height,
+                        c.max_fps,
+                        c.target_bitrate_bps / 1000,
+                        c.encoder
+                    ),
+                    Some(Event::Frame(f)) => {
+                        frames += 1;
+                        bytes += f.data.len() as u64;
+                        if let Some(o) = &mut out {
+                            o.write_all(&f.data)?;
+                        }
+                        handle.ack(f.frame_id).await.ok();
+                        if frames % 30 == 1 {
+                            let secs = started.elapsed().as_secs_f64().max(0.001);
+                            println!(
+                                "{frames} images, {:.0} kbit/s en moyenne",
+                                bytes as f64 * 8.0 / secs / 1000.0
+                            );
+                        }
+                    }
+                    Some(Event::Ended { reason, message }) => {
+                        println!("Session terminée par le host : {reason:?} {message}");
+                        break;
+                    }
+                    None => {
+                        handle.close().await;
+                        break;
+                    }
                 }
             }
-            chan.close().await?;
+            if let Some(mut o) = out {
+                o.flush()?;
+                if let Some(p) = &record {
+                    println!("{frames} images enregistrées dans {}", p.display());
+                }
+            }
             rv.close();
             Ok(())
         }

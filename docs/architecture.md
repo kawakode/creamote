@@ -27,6 +27,17 @@ Disponible sur les serveurs auto-hébergés (pas sur le serveur officiel). Donn�
 
 Un rôle (ensemble de permissions) est attribué à un utilisateur ou un groupe de sécurité sur une portée : entité, parc (imbricable) ou machine, avec héritage vers le bas. Le serveur évalue les droits à la demande de connexion et émet un **ticket de session signé** ; le host, qui a épinglé la clé du serveur à l'enrôlement, n'applique que les permissions du ticket.
 
+## Session desktop (M2)
+
+- **Capture** (`creamote-capture`) : API natives seulement, image BGRA livrée quand l'écran change. Windows : DXGI Desktop Duplication ; macOS : ScreenCaptureKit ; Linux X11 : MIT-SHM avec repli `GetImage`, curseur via XFixes. Wayland (portail + PipeWire) arrive en M3.
+- **Encodage** (`creamote-codec`) : H.264 Annex B sans images B. Windows : MFT Media Foundation matériels du constructeur (Quick Sync, NVENC, AMF), puis encodeur Microsoft ; macOS : VideoToolbox ; Linux et machines sans encodeur matériel : openh264. Un encodeur qui échoue en cours de session passe la main au suivant (image clé forcée).
+- **Entrées** (`creamote-input`) : touches physiques (usages USB HID, comme `KeyboardEvent.code`), pointeur en coordonnées normalisées sur l'écran diffusé. Windows : `SendInput` en scancodes ; macOS : `CGEventPost` ; X11 : XTest. Tout ce qui est enfoncé est relâché en fin de session.
+- **Session** (`creamote-session`) : `Hello` → consentement éventuel → `HelloAck` (permissions accordées, écrans) → `VideoConfig` → flux de `VideoChunk`. Le viewer acquitte chaque image décodée ; le host ne garde que 3 images en vol, ce qui borne la latence quand le réseau sature. Les entrées ne sont injectées que si `control` est accordé.
+- **Consentement** : demandé à l'utilisateur présent (contrôle, vue seule, refus ; 30 s puis refus) pour un host non enrôlé ou un ticket sans `unattended`. La boîte affiche l'appareil et le compte vérifiés et le code de vérification. Windows : `MessageBox` ; macOS : AppleScript (`osascript`) ; Linux : zenity ou kdialog ; à défaut le terminal.
+- **Client** : Tauri, décodage par WebCodecs dans la WebView, openh264 en repli.
+
+Décisions : [ADR 0002](adr/0002-medias.md).
+
 ## Milestones
 
 | Milestone | Contenu |
