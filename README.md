@@ -19,7 +19,7 @@ Milestone **M1 : rendezvous et relay**. Voir [docs/architecture.md](docs/archite
 - `crates/creamote-proto` : types générés et framing des messages.
 - `crates/creamote-crypto` : identité d'appareil (Ed25519 + clé Noise X25519 liée), ID à 9 chiffres, empreinte, handshake Noise XX authentifié et canal chiffré.
 - `crates/creamote-net` : QUIC avec certificat de serveur épinglé, client de rendezvous, connexion au relay, canal chiffré de bout en bout.
-- `server/` : rendezvous + relay, mode public avec limites (voir [deploy/](deploy/README.md)), et gestion de parc : comptes, entités, parcs, groupes de sécurité, RBAC et audit, via une [API HTTP](docs/api.md) sur SQLite ou PostgreSQL.
+- `server/` : rendezvous + relay, mode public avec limites (voir [deploy/](deploy/README.md)), et gestion de parc : comptes, entités, parcs, groupes de sécurité, RBAC et audit, via une [API HTTP](docs/api.md) et une console web d'administration intégrée, sur SQLite ou PostgreSQL ; enrôlement des machines et tickets de session signés.
 - `host/` : s'enregistre et accepte les sessions (écho chiffré en attendant la capture d'écran de M2).
 - `cli/` : `creamote-cli`, outil de test des connexions.
 

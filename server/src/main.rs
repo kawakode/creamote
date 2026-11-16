@@ -154,7 +154,10 @@ async fn main() -> anyhow::Result<()> {
         policy.max_relay_sessions, policy.max_relay_sessions_per_ip, policy.max_relay_seconds
     );
     match server.api_addr() {
-        Some(a) => println!("API        : http://{a}/api/v1"),
+        Some(a) => {
+            println!("API        : http://{a}/api/v1");
+            println!("Console    : http://{a}/");
+        }
         None => println!("API        : désactivée (mode public)"),
     }
     println!("Les pairs se connectent avec --server <adresse> --server-pin <empreinte>.");
