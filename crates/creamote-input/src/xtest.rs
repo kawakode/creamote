@@ -24,7 +24,7 @@ pub(crate) struct XTest {
 
 impl XTest {
     pub(crate) fn open() -> Result<Self> {
-        let (conn, screen) = x11rb::connect(None)
+        let (conn, screen) = RustConnection::connect(None)
             .map_err(|e| InputError::Unsupported(format!("pas de serveur X11 : {e}")))?;
         conn.xtest_get_version(2, 2)
             .map_err(err)?

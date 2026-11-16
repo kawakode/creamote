@@ -67,7 +67,7 @@ sha1 = "0.10"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 # Médias (M2) : API natives des OS, openh264 en repli logiciel.
-x11rb = { version = "0.14", features = ["randr", "shm", "xfixes", "xtest", "allow-unsafe-code"] }
+x11rb = { version = "0.14", features = ["randr", "shm", "xfixes", "xtest"] }
 openh264 = "0.9"
 windows = "0.62"
 objc2 = "0.6"

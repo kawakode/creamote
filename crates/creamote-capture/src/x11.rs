@@ -24,7 +24,7 @@ fn err(e: impl std::fmt::Display) -> CaptureError {
 pub fn init() {}
 
 fn connect() -> Result<(RustConnection, Window)> {
-    let (conn, screen) = x11rb::connect(None)
+    let (conn, screen) = RustConnection::connect(None)
         .map_err(|e| CaptureError::Unsupported(format!("pas de serveur X11 ($DISPLAY) : {e}")))?;
     let root = conn.setup().roots[screen].root;
     Ok((conn, root))
