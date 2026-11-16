@@ -994,6 +994,9 @@ async fn totp_enrollment_login_and_recovery() {
         StatusCode::OK
     );
 
+    // Code réutilisé tel quel plus bas : un code recalculé pourrait tomber
+    // dans le pas suivant et être légitimement accepté.
+    let enable_code = current_code(&secret);
     let (s, _) = api
         .post(
             "/api/v1/me/totp/enable",
@@ -1006,7 +1009,7 @@ async fn totp_enrollment_login_and_recovery() {
         .post(
             "/api/v1/me/totp/enable",
             &alice,
-            json!({ "code": current_code(&secret) }),
+            json!({ "code": enable_code }),
         )
         .await;
     assert_eq!(s, StatusCode::OK, "{en}");
@@ -1032,7 +1035,7 @@ async fn totp_enrollment_login_and_recovery() {
         (s, b["error"].clone()),
         (StatusCode::UNAUTHORIZED, json!("totp_invalid"))
     );
-    let (s, _) = login_with(&api, "alice", PASSWORD, Some(&current_code(&secret))).await;
+    let (s, _) = login_with(&api, "alice", PASSWORD, Some(&enable_code)).await;
     assert_eq!(
         s,
         StatusCode::UNAUTHORIZED,

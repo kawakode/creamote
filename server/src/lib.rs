@@ -281,11 +281,15 @@ struct Peer {
     identity: PublicIdentity,
     tx: mpsc::Sender<RendezvousMessage>,
     conn_id: u64,
+    /// Adresses candidates pour la connexion directe (observée puis LAN),
+    /// vide si le pair est `relay_only`.
+    addrs: Vec<String>,
 }
 
 struct Pending {
     host: DeviceId,
     viewer_ip: IpAddr,
+    viewer_addrs: Vec<String>,
     viewer_tx: mpsc::Sender<RendezvousMessage>,
     request_id: u64,
     created: tokio::time::Instant,
@@ -439,6 +443,7 @@ async fn control_stream(
         return Ok(());
     };
     let device_id = identity.device_id();
+    let addrs = candidates(&conn, &reg);
 
     let (tx, mut rx) = mpsc::channel::<RendezvousMessage>(32);
     let conflict = {
@@ -455,6 +460,7 @@ async fn control_stream(
                     identity: identity.clone(),
                     tx: tx.clone(),
                     conn_id,
+                    addrs: addrs.clone(),
                 },
             );
         }
@@ -487,7 +493,7 @@ async fn control_stream(
     while let Ok(Some(m)) = frame::read_msg::<_, RendezvousMessage>(&mut recv).await {
         match m.kind {
             Some(Kind::ConnectRequest(req)) => {
-                handle_request(&state, &identity, &conn, &tx, req);
+                handle_request(&state, &identity, &conn, &addrs, &tx, req);
             }
             Some(Kind::ConnectAnswer(ans)) => handle_answer(&state, device_id, &tx, ans),
             Some(Kind::EnrollRequest(req)) => {
@@ -505,6 +511,29 @@ async fn control_stream(
         tracing::info!(%device_id, "pair déconnecté");
     }
     Ok(())
+}
+
+/// Adresses candidates d'un pair : celle observée par le serveur, puis ses
+/// adresses LAN annoncées (validées, au plus 8 au total).
+fn candidates(conn: &quinn::Connection, reg: &RegisterPeer) -> Vec<String> {
+    if reg.relay_only {
+        return Vec::new();
+    }
+    let mut out = vec![conn.remote_address()];
+    for a in &reg.local_addrs {
+        let Ok(addr) = a.parse::<SocketAddr>() else {
+            continue;
+        };
+        let ip = addr.ip();
+        if addr.port() == 0 || ip.is_unspecified() || ip.is_multicast() || out.contains(&addr) {
+            continue;
+        }
+        out.push(addr);
+        if out.len() == creamote_net::p2p::MAX_CANDIDATES {
+            break;
+        }
+    }
+    out.iter().map(SocketAddr::to_string).collect()
 }
 
 fn platform_name(p: creamote_proto::common::v1::Platform) -> &'static str {
@@ -588,6 +617,7 @@ fn handle_request(
     state: &State,
     viewer: &PublicIdentity,
     conn: &quinn::Connection,
+    viewer_addrs: &[String],
     viewer_tx: &mpsc::Sender<RendezvousMessage>,
     req: ConnectRequest,
 ) {
@@ -611,6 +641,7 @@ fn handle_request(
             Pending {
                 host: target,
                 viewer_ip: conn.remote_address().ip(),
+                viewer_addrs: viewer_addrs.to_vec(),
                 viewer_tx: viewer_tx.clone(),
                 request_id: req.request_id,
                 created: tokio::time::Instant::now(),
@@ -620,8 +651,8 @@ fn handle_request(
     let offer = ConnectOffer {
         session_id: session_id.to_vec(),
         requester: Some(ident::to_proto(viewer)),
-        requester_observed_addr: conn.remote_address().to_string(),
-        requester_local_addrs: Vec::new(),
+        requester_observed_addr: viewer_addrs.first().cloned().unwrap_or_default(),
+        requester_local_addrs: viewer_addrs.iter().skip(1).cloned().collect(),
         session_ticket: req.session_ticket,
     };
     if host_tx.try_send(msg(Kind::ConnectOffer(offer))).is_err() {
@@ -655,29 +686,53 @@ fn handle_answer(
     if !ans.accepted {
         return reject(&p.viewer_tx, p.request_id, RejectReason::Declined);
     }
-    let ip = match state.policy.max_relay_sessions_per_ip {
-        0 => None,
-        max => match IpGuard::acquire(&state.ip_sessions, p.viewer_ip, max) {
-            Some(guard) => Some(guard),
-            None => {
-                tracing::info!(ip = %p.viewer_ip, "quota de sessions relay atteint pour cette IP");
-                return reject(&p.viewer_tx, p.request_id, RejectReason::QuotaExceeded);
-            }
-        },
+    // Connexion directe possible si aucun des deux pairs n'est relay_only.
+    let host_addrs = state
+        .peers
+        .lock()
+        .expect("verrou sain")
+        .get(&host)
+        .map(|peer| peer.addrs.clone())
+        .unwrap_or_default();
+    let direct = !host_addrs.is_empty() && !p.viewer_addrs.is_empty();
+    let (viewer_peer, host_peer) = if direct {
+        (host_addrs, p.viewer_addrs.clone())
+    } else {
+        (Vec::new(), Vec::new())
     };
-    let global = match &state.permits {
-        Some(sem) => match sem.clone().try_acquire_owned() {
-            Ok(permit) => Some(permit),
-            Err(_) => {
-                tracing::warn!("relay plein, session refusée");
-                return reject(&p.viewer_tx, p.request_id, RejectReason::RelayFull);
-            }
-        },
-        None => None,
+
+    let grant = |token: Option<&Token>,
+                 request_id: u64,
+                 peer_addrs: Vec<String>,
+                 unavailable: RejectReason| {
+        msg(Kind::RelayGrant(RelayGrant {
+            session_id: session_id.to_vec(),
+            relay_addr: if token.is_some() {
+                state.relay_addr.clone()
+            } else {
+                String::new()
+            },
+            relay_token: token.map(|t| t.to_vec()).unwrap_or_default(),
+            expires_in_seconds: state.policy.relay_join_timeout.as_secs() as u32,
+            request_id,
+            max_session_seconds: state.policy.max_relay_seconds,
+            peer_addrs,
+            relay_unavailable: unavailable as i32,
+        }))
     };
-    let quota = Quota {
-        _global: global,
-        _ip: ip,
+
+    let quota = match relay_quota(state, &p) {
+        Ok(quota) => quota,
+        // Relay indisponible : la session peut encore aboutir en direct, qui
+        // ne coûte rien au serveur.
+        Err(reason) if direct => {
+            let _ = p
+                .viewer_tx
+                .try_send(grant(None, p.request_id, viewer_peer, reason));
+            let _ = host_tx.try_send(grant(None, 0, host_peer, reason));
+            return;
+        }
+        Err(reason) => return reject(&p.viewer_tx, p.request_id, reason),
     };
 
     let tokens: [Token; 2] = [random(), random()];
@@ -697,18 +752,39 @@ fn handle_answer(
         st.relays.lock().expect("verrou sain").remove(&session_id);
     });
 
-    let grant = |token: &Token, request_id: u64| {
-        msg(Kind::RelayGrant(RelayGrant {
-            session_id: session_id.to_vec(),
-            relay_addr: state.relay_addr.clone(),
-            relay_token: token.to_vec(),
-            expires_in_seconds: timeout.as_secs() as u32,
-            request_id,
-            max_session_seconds: state.policy.max_relay_seconds,
-        }))
+    let none = RejectReason::Unspecified;
+    let _ = p
+        .viewer_tx
+        .try_send(grant(Some(&tokens[0]), p.request_id, viewer_peer, none));
+    let _ = host_tx.try_send(grant(Some(&tokens[1]), 0, host_peer, none));
+}
+
+/// Réserve une place sur le relay (quota par IP, puis global).
+fn relay_quota(state: &State, p: &Pending) -> Result<Quota, RejectReason> {
+    let ip = match state.policy.max_relay_sessions_per_ip {
+        0 => None,
+        max => match IpGuard::acquire(&state.ip_sessions, p.viewer_ip, max) {
+            Some(guard) => Some(guard),
+            None => {
+                tracing::info!(ip = %p.viewer_ip, "quota de sessions relay atteint pour cette IP");
+                return Err(RejectReason::QuotaExceeded);
+            }
+        },
     };
-    let _ = p.viewer_tx.try_send(grant(&tokens[0], p.request_id));
-    let _ = host_tx.try_send(grant(&tokens[1], 0));
+    let global = match &state.permits {
+        Some(sem) => match sem.clone().try_acquire_owned() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                tracing::warn!("relay plein");
+                return Err(RejectReason::RelayFull);
+            }
+        },
+        None => None,
+    };
+    Ok(Quota {
+        _global: global,
+        _ip: ip,
+    })
 }
 
 fn relay_join(state: Arc<State>, send: SendStream, recv: RecvStream, join: RelayJoin) {

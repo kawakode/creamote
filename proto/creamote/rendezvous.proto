@@ -19,6 +19,9 @@ message RegisterPeer {
   // label "EXPORTER-creamote-register", 32 octets). Liée à la connexion, elle
   // ne peut pas être rejouée sur une autre.
   bytes proof = 5;
+  // Le pair refuse la connexion directe : le serveur ne communique jamais
+  // ses adresses à l'autre pair et la session passe par le relay.
+  bool relay_only = 6;
 }
 
 message RegisterPeerResponse {
@@ -77,7 +80,8 @@ message ConnectAnswer {
   repeated string host_local_addrs = 4;
 }
 
-// Si le P2P échoue, les deux pairs rejoignent le relay avec ce jeton.
+// Session acceptée : adresses de l'autre pair pour la connexion directe
+// (hole punching) et jeton du relay, utilisé si le direct échoue.
 message RelayGrant {
   bytes session_id = 1;
   // Adresse du relay ; vide = même adresse que le serveur de rendezvous.
@@ -89,6 +93,12 @@ message RelayGrant {
   uint64 request_id = 5;
   // Durée maximale de la session relay, 0 = illimitée.
   uint32 max_session_seconds = 6;
+  // Adresses candidates de l'autre pair (observée par le serveur puis LAN),
+  // `ip:port`. Vide si l'un des pairs est `relay_only`.
+  repeated string peer_addrs = 7;
+  // Relay indisponible (quota, relay plein) : `relay_token` est vide et seule
+  // la connexion directe est tentée. Raison à présenter si elle échoue.
+  ConnectRejected.Reason relay_unavailable = 8;
 }
 
 message ConnectRejected {
@@ -112,6 +122,14 @@ message ConnectRejected {
 message RelayJoin {
   bytes session_id = 1;
   bytes relay_token = 2;
+}
+
+// Premier message d'une connexion directe entre pairs (QUIC, ALPN
+// `creamote-p2p/1`) : le viewer désigne la session. Il ne l'envoie qu'une fois
+// ce chemin choisi ; le host abandonne alors le relay. Noise authentifie
+// ensuite les deux pairs comme sur le relay.
+message DirectJoin {
+  bytes session_id = 1;
 }
 
 // Un host enregistré rejoint un parc avec un jeton d'enrôlement créé par un
@@ -151,5 +169,6 @@ message RendezvousMessage {
     RelayJoin relay_join = 8;
     EnrollRequest enroll_request = 9;
     EnrollResponse enroll_response = 10;
+    DirectJoin direct_join = 11;
   }
 }

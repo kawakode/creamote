@@ -18,7 +18,7 @@ Milestone **M1 : rendezvous et relay**. Voir [docs/architecture.md](docs/archite
 - `proto/` : schémas protobuf (rendezvous, relay, session).
 - `crates/creamote-proto` : types générés et framing des messages.
 - `crates/creamote-crypto` : identité d'appareil (Ed25519 + clé Noise X25519 liée), ID à 9 chiffres, empreinte, handshake Noise XX authentifié et canal chiffré.
-- `crates/creamote-net` : QUIC avec certificat de serveur épinglé, client de rendezvous, connexion au relay, canal chiffré de bout en bout.
+- `crates/creamote-net` : QUIC avec certificat de serveur épinglé, client de rendezvous, connexion directe entre pairs (LAN, hole punching UDP) avec repli sur le relay, canal chiffré de bout en bout.
 - `server/` : rendezvous + relay, mode public avec limites (voir [deploy/](deploy/README.md)), et gestion de parc : comptes, entités, parcs, groupes de sécurité, RBAC et audit, via une [API HTTP](docs/api.md) et une console web d'administration intégrée, sur SQLite ou PostgreSQL ; enrôlement des machines et tickets de session signés.
 - `crates/creamote-capture` : capture d'écran native (DXGI Desktop Duplication, ScreenCaptureKit, X11 MIT-SHM).
 - `crates/creamote-codec` : encodage H.264 par les encodeurs matériels natifs (Media Foundation, VideoToolbox), openh264 en repli.
@@ -37,7 +37,9 @@ cargo run -p creamote-host -- --server 127.0.0.1:21400 --server-pin <empreinte>
 cargo run -p creamote-cli -- view "<ID>" --server 127.0.0.1:21400 --server-pin <empreinte> --record flux.h264
 ```
 
-Le host affiche une demande de connexion (contrôle, vue seule ou refus) avec le code de vérification, identique des deux côtés. Une fois acceptée, l'écran du host est encodé en H.264 et traverse le relay chiffré de bout en bout ; `ffplay flux.h264` relit l'enregistrement. Sous macOS, autorisez le host dans Réglages Système > Confidentialité et sécurité > Enregistrement de l'écran et Accessibilité.
+Le host affiche une demande de connexion (contrôle, vue seule ou refus) avec le code de vérification, identique des deux côtés. Une fois acceptée, l'écran du host est encodé en H.264 et est chiffré de bout en bout, en connexion directe quand c'est possible, via le relay sinon (`--relay-only` côté host ou client pour ne jamais révéler son adresse à l'autre pair) ; `ffplay flux.h264` relit l'enregistrement. Sous macOS, autorisez le host dans Réglages Système > Confidentialité et sécurité > Enregistrement de l'écran et Accessibilité.
+
+`sudo tools/nat-lab.sh cone|symmetric|same-lan` (Linux) rejoue une session entre deux machines derrière des NAT simulés.
 
 ## Développement
 

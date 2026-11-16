@@ -20,6 +20,7 @@ quinn.workspace = true
 rustls.workspace = true
 rcgen.workspace = true
 tracing.workspace = true
+if-addrs.workspace = true
 
 [lints]
 workspace = true

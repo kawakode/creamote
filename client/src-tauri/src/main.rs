@@ -12,9 +12,9 @@ use std::sync::mpsc as std_mpsc;
 
 use anyhow::Context;
 use creamote_crypto::{DeviceId, DeviceIdentity, store};
-use creamote_net::relay::RelayStream;
 use creamote_net::rendezvous::RendezvousClient;
 use creamote_net::secure::SecureChannel;
+use creamote_net::stream::PeerPath;
 use creamote_net::tls::ServerPin;
 use creamote_proto::permissions::Permissions;
 use creamote_proto::session::v1::PointerEvent;
@@ -156,8 +156,9 @@ async fn open(
         .await
         .context("connexion au serveur")?;
     let grant = rv.request_session_with_ticket(target, ticket).await?;
-    let relay = rv.relay_addr(&grant)?;
-    let stream = RelayStream::join(relay, pin, &grant).await?;
+    // Connexion directe si possible, relay sinon.
+    let stream = rv.connector().viewer(&grant).await?;
+    let direct = stream.path() == PeerPath::Direct;
     let chan = SecureChannel::initiate(stream, identity).await?;
     anyhow::ensure!(
         chan.remote().device_id() == target,
@@ -167,7 +168,9 @@ async fn open(
         "type": "connected",
         "code": chan.verification_code(),
         "fingerprint": chan.remote().fingerprint(),
-        "maxSessionSeconds": grant.max_session_seconds,
+        "direct": direct,
+        // La limite du serveur public ne s'applique qu'au relay.
+        "maxSessionSeconds": if direct { 0 } else { grant.max_session_seconds },
     }));
 
     let requested = if args.view_only {

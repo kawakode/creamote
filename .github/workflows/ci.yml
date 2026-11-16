@@ -38,6 +38,19 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked
       - run: cargo test --workspace --locked
 
+  nat-lab:
+    name: hole punching derrière NAT simulés
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked -p creamote-server -p creamote-host -p creamote-cli
+      - run: |
+          for mode in same-lan cone symmetric; do
+            sudo tools/nat-lab.sh "$mode"
+          done
+
   client:
     name: client Tauri (${{ matrix.os }})
     strategy:

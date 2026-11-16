@@ -1,7 +1,7 @@
 //! Host Creamote.
 //!
-//! S'enregistre auprès d'un serveur et accepte les sessions entrantes via le
-//! relay. Chaque session établit un canal Noise de bout en bout, puis diffuse
+//! S'enregistre auprès d'un serveur et accepte les sessions entrantes, en
+//! connexion directe si possible, via le relay sinon. Chaque session établit un canal Noise de bout en bout, puis diffuse
 //! l'écran (capture et encodage H.264 natifs) et injecte clavier et souris
 //! selon les permissions accordées.
 //!
@@ -23,9 +23,9 @@ use clap::Parser;
 use creamote_codec::Preference;
 use creamote_crypto::{DeviceIdentity, PublicIdentity, store};
 use creamote_net::ident;
-use creamote_net::relay::RelayStream;
-use creamote_net::rendezvous::{Event, RendezvousClient};
+use creamote_net::rendezvous::{Connector, Event, RegisterOptions, RendezvousClient};
 use creamote_net::secure::SecureChannel;
+use creamote_net::stream::{PeerPath, PeerStream};
 use creamote_net::ticket::{self, Decision, Enrollment};
 use creamote_net::tls::ServerPin;
 use creamote_proto::permissions::Permissions;
@@ -61,6 +61,10 @@ struct Args {
     /// réel.
     #[arg(long)]
     unattended_dev: bool,
+    /// Refuse la connexion directe : l'adresse de cette machine n'est pas
+    /// communiquée aux viewers, toutes les sessions passent par le relay.
+    #[arg(long)]
+    relay_only: bool,
 }
 
 #[tokio::main]
@@ -96,7 +100,11 @@ async fn main() -> anyhow::Result<()> {
         .await?
         .next()
         .with_context(|| format!("adresse introuvable : {server}"))?;
-    let mut rv = RendezvousClient::register(addr, pin, &identity).await?;
+    let options = RegisterOptions {
+        accept_direct: true,
+        relay_only: args.relay_only,
+    };
+    let mut rv = RendezvousClient::register_with(addr, pin, &identity, options).await?;
 
     if let Some(token) = args.enroll {
         anyhow::ensure!(
@@ -144,7 +152,6 @@ async fn main() -> anyhow::Result<()> {
     }
     let ctx = Ctx {
         identity: Arc::new(identity),
-        pin,
         enrollment,
         media: Media::native(args.encoder),
         unattended_dev: args.unattended_dev,
@@ -154,7 +161,6 @@ async fn main() -> anyhow::Result<()> {
 
 struct Ctx {
     identity: Arc<DeviceIdentity>,
-    pin: ServerPin,
     enrollment: Option<Enrollment>,
     media: Media,
     unattended_dev: bool,
@@ -243,11 +249,11 @@ async fn serve(
                 let Some((expected, policy)) = offers.remove(&grant.session_id) else {
                     continue;
                 };
-                let relay = rv.relay_addr(&grant)?;
+                let connector = rv.connector();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
                     let who = expected.device_id().to_string();
-                    match session(relay, grant, expected, policy, &ctx).await {
+                    match session(connector, grant, expected, policy, &ctx).await {
                         Ok(s) => println!("Session avec {who} terminée ({:?}).", s.granted),
                         Err(e) => eprintln!("Session avec {who} interrompue : {e:#}"),
                     }
@@ -263,32 +269,37 @@ async fn serve(
 /// Ouvre le canal chiffré de bout en bout avec le viewer et vérifie son
 /// identité.
 async fn open_channel(
-    relay: std::net::SocketAddr,
-    pin: ServerPin,
+    connector: &Connector,
     grant: &creamote_net::rendezvous::RelayGrant,
     expected: &PublicIdentity,
     identity: &DeviceIdentity,
-) -> anyhow::Result<SecureChannel<RelayStream>> {
-    let stream = RelayStream::join(relay, pin, grant).await?;
+) -> anyhow::Result<(SecureChannel<PeerStream>, PeerPath)> {
+    // Connexion directe si possible, relay sinon.
+    let stream = connector.host(grant).await?;
+    let path = stream.path();
     let chan = SecureChannel::respond(stream, identity).await?;
     // Le serveur a annoncé une identité ; Noise prouve celle du pair réel.
     anyhow::ensure!(
         chan.remote() == expected,
         "l'identité authentifiée ne correspond pas à celle annoncée par le serveur"
     );
-    Ok(chan)
+    Ok((chan, path))
 }
 
 async fn session(
-    relay: std::net::SocketAddr,
+    connector: Connector,
     grant: creamote_net::rendezvous::RelayGrant,
     expected: PublicIdentity,
     policy: Policy,
     ctx: &Ctx,
 ) -> anyhow::Result<host::Summary> {
-    let chan = open_channel(relay, ctx.pin, &grant, &expected, &ctx.identity).await?;
+    let (chan, path) = open_channel(&connector, &grant, &expected, &ctx.identity).await?;
+    let path = match path {
+        PeerPath::Direct => "connexion directe",
+        PeerPath::Relay => "via le relay",
+    };
     println!(
-        "Session chiffrée avec {} — code de vérification {}",
+        "Session chiffrée avec {} ({path}) — code de vérification {}",
         expected.device_id(),
         chan.verification_code()
     );
