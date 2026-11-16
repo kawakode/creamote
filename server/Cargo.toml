@@ -33,6 +33,9 @@ serde.workspace = true
 serde_json.workspace = true
 blake3.workspace = true
 thiserror.workspace = true
+hmac.workspace = true
+sha1.workspace = true
+qrcode.workspace = true
 
 [dev-dependencies]
 creamote-crypto.workspace = true

@@ -34,6 +34,7 @@ impl Env {
             policy: Policy::private(),
             database_url: Some("sqlite::memory:".into()),
             api_listen: Some("127.0.0.1:0".parse().unwrap()),
+            trust_forwarded_for: false,
         })
         .await
         .unwrap();
@@ -277,6 +278,7 @@ async fn enrollment_unavailable_without_fleet_management() {
         policy: Policy::public(),
         database_url: None,
         api_listen: None,
+        trust_forwarded_for: false,
     })
     .await
     .unwrap();

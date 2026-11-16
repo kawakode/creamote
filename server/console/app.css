@@ -140,3 +140,10 @@ pre { padding: 10px 12px; overflow-x: auto; white-space: pre-wrap; word-break: b
   main { padding: 16px; }
   .grid2 { grid-template-columns: 1fr; }
 }
+
+.pill.warn { background: none; border: 1px solid var(--danger); color: var(--danger); margin-left: 6px; }
+header.top .who:hover { text-decoration: none; color: var(--text); }
+img.qr { display: block; background: #fff; padding: 8px; border-radius: 6px; margin: 8px 0; }
+code.secret { font-size: 15px; letter-spacing: .05em; }
+pre.codes { columns: 2; max-width: 360px; font-size: 15px; }
+[hidden] { display: none !important; }

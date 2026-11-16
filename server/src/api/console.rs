@@ -18,7 +18,7 @@ const APP_CSS: &str = include_str!("../../console/app.css");
 const ICON: &str = include_str!("../../console/icon.svg");
 
 const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; \
-    img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; \
+    img-src 'self' blob:; connect-src 'self'; base-uri 'none'; form-action 'none'; \
     frame-ancestors 'none'";
 
 pub fn router() -> Router<AppState> {

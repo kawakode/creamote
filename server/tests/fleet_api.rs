@@ -898,3 +898,275 @@ async fn console_is_served_with_strict_headers() {
     assert_eq!(s, StatusCode::OK);
     assert!(info.get("server_pin").is_some() && info.get("version").is_some());
 }
+
+async fn login_with(
+    api: &Api,
+    name: &str,
+    password: &str,
+    code: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut body = json!({ "email": api.email(name), "password": password });
+    if let Some(c) = code {
+        body["totp_code"] = json!(c);
+    }
+    api.call(Method::POST, "/api/v1/auth/login", None, Some(body))
+        .await
+}
+
+fn current_code(secret: &str) -> String {
+    use creamote_server::totp;
+    let key = totp::base32_decode(secret).unwrap();
+    let step = creamote_server::db::now() / totp::STEP_SECS;
+    format!("{:06}", totp::hotp(&key, step as u64))
+}
+
+#[tokio::test]
+async fn login_attempts_are_rate_limited_per_account() {
+    let api = Api::new().await;
+    api.user("alice", false).await;
+    api.user("bob", false).await;
+    for _ in 0..5 {
+        assert_eq!(
+            login_with(&api, "alice", "mauvais mot de passe", None)
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    // Même le bon mot de passe est refusé pendant le blocage.
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/v1/auth/login")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({ "email": api.email("alice"), "password": PASSWORD }).to_string(),
+        ))
+        .unwrap();
+    let resp = api.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    let retry: u64 = resp.headers()["retry-after"]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(retry > 0 && retry <= 15 * 60);
+    // Les autres comptes ne sont pas touchés.
+    assert_eq!(
+        login_with(&api, "bob", PASSWORD, None).await.0,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn totp_enrollment_login_and_recovery() {
+    let api = Api::new().await;
+    let (alice_id, alice) = api.user("alice", false).await;
+    let (_, root) = api.user("root", true).await;
+
+    let (s, _) = api
+        .post(
+            "/api/v1/me/totp/setup",
+            &alice,
+            json!({ "password": "pas le bon" }),
+        )
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, setup) = api
+        .post(
+            "/api/v1/me/totp/setup",
+            &alice,
+            json!({ "password": PASSWORD }),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{setup}");
+    let secret = setup["secret"].as_str().unwrap().to_owned();
+    assert!(
+        setup["otpauth_uri"]
+            .as_str()
+            .unwrap()
+            .starts_with("otpauth://totp/Creamote:")
+    );
+    assert!(setup["qr_svg"].as_str().unwrap().contains("<svg"));
+    // Pas encore active : la connexion ne demande rien de plus.
+    assert_eq!(
+        login_with(&api, "alice", PASSWORD, None).await.0,
+        StatusCode::OK
+    );
+
+    let (s, _) = api
+        .post(
+            "/api/v1/me/totp/enable",
+            &alice,
+            json!({ "code": "000000" }),
+        )
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, en) = api
+        .post(
+            "/api/v1/me/totp/enable",
+            &alice,
+            json!({ "code": current_code(&secret) }),
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK, "{en}");
+    let codes: Vec<String> = serde_json::from_value(en["recovery_codes"].clone()).unwrap();
+    assert_eq!(codes.len(), 10);
+    let (_, me) = api.get("/api/v1/me", &alice).await;
+    assert_eq!(
+        (
+            me["totp_enabled"].clone(),
+            me["recovery_codes_left"].clone()
+        ),
+        (json!(true), json!(10))
+    );
+
+    // Connexion : code requis, code faux refusé, code déjà utilisé refusé.
+    let (s, b) = login_with(&api, "alice", PASSWORD, None).await;
+    assert_eq!(
+        (s, b["error"].clone()),
+        (StatusCode::UNAUTHORIZED, json!("totp_required"))
+    );
+    let (s, b) = login_with(&api, "alice", PASSWORD, Some("123456")).await;
+    assert_eq!(
+        (s, b["error"].clone()),
+        (StatusCode::UNAUTHORIZED, json!("totp_invalid"))
+    );
+    let (s, _) = login_with(&api, "alice", PASSWORD, Some(&current_code(&secret))).await;
+    assert_eq!(
+        s,
+        StatusCode::UNAUTHORIZED,
+        "code consommé à l'activation : pas de rejeu"
+    );
+    sqlx::query("UPDATE users SET totp_last_step = 0 WHERE id = $1")
+        .bind(&alice_id)
+        .execute(api.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        login_with(&api, "alice", PASSWORD, Some(&current_code(&secret)))
+            .await
+            .0,
+        StatusCode::OK
+    );
+
+    // Code de secours : une seule fois, saisie tolérante.
+    let messy = codes[0].to_uppercase().replace('-', " ");
+    assert_eq!(
+        login_with(&api, "alice", PASSWORD, Some(&messy)).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        login_with(&api, "alice", PASSWORD, Some(&codes[0])).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (_, me) = api.get("/api/v1/me", &alice).await;
+    assert_eq!(me["recovery_codes_left"], json!(9));
+
+    // Désactivation : mot de passe + code.
+    let (s, _) = api
+        .post(
+            "/api/v1/me/totp/disable",
+            &alice,
+            json!({ "password": PASSWORD, "code": "000000" }),
+        )
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, _) = api
+        .post(
+            "/api/v1/me/totp/disable",
+            &alice,
+            json!({ "password": PASSWORD, "code": codes[1] }),
+        )
+        .await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    assert_eq!(
+        login_with(&api, "alice", PASSWORD, None).await.0,
+        StatusCode::OK
+    );
+
+    // Réinitialisation par un super-admin (appareil perdu) : sessions révoquées.
+    let (_, setup) = api
+        .post(
+            "/api/v1/me/totp/setup",
+            &alice,
+            json!({ "password": PASSWORD }),
+        )
+        .await;
+    let secret = setup["secret"].as_str().unwrap().to_owned();
+    api.post(
+        "/api/v1/me/totp/enable",
+        &alice,
+        json!({ "code": current_code(&secret) }),
+    )
+    .await;
+    let reset = format!("/api/v1/users/{alice_id}/totp/reset");
+    assert_eq!(
+        api.post(&reset, &alice, json!({})).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        api.post(&reset, &root, json!({})).await.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        api.get("/api/v1/me", &alice).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        login_with(&api, "alice", PASSWORD, None).await.0,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn address_book_is_private() {
+    let api = Api::new().await;
+    let (_, alice) = api.user("alice", false).await;
+    let (_, bob) = api.user("bob", false).await;
+    let book = "/api/v1/me/address-book";
+
+    let (s, _) = api
+        .post(
+            book,
+            &alice,
+            json!({ "label": "PC maman", "device_id": "12345" }),
+        )
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, e) = api
+        .post(
+            book,
+            &alice,
+            json!({ "label": "PC maman", "device_id": "012345678", "notes": "salon" }),
+        )
+        .await;
+    assert_eq!(s, StatusCode::CREATED, "{e}");
+    let eid = id(&e);
+    let (_, list) = api.get(book, &alice).await;
+    assert_eq!(list[0]["device_id"], json!("012 345 678"));
+    assert_eq!(list[0]["notes"], json!("salon"));
+    assert_eq!(api.get(book, &bob).await.1, json!([]));
+
+    let entry = format!("{book}/{eid}");
+    assert_eq!(
+        api.patch(&entry, &bob, json!({ "label": "x" })).await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(api.delete(&entry, &bob).await, StatusCode::NOT_FOUND);
+    assert_eq!(
+        api.patch(
+            &entry,
+            &alice,
+            json!({ "label": "PC de maman", "device_id": "987 654 321" })
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+    let (_, list) = api.get(book, &alice).await;
+    assert_eq!(
+        (list[0]["label"].clone(), list[0]["device_id"].clone()),
+        (json!("PC de maman"), json!("987 654 321"))
+    );
+    assert_eq!(api.delete(&entry, &alice).await, StatusCode::NO_CONTENT);
+    assert_eq!(api.get(book, &alice).await.1, json!([]));
+}

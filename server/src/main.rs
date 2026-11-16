@@ -46,6 +46,11 @@ struct Args {
     /// reverse proxy TLS si elle n'est pas sur 127.0.0.1).
     #[arg(long, default_value = "127.0.0.1:21401")]
     api_listen: SocketAddr,
+    /// L'API est derrière un reverse proxy de confiance : lire l'adresse du
+    /// client dans `X-Forwarded-For`. N'activez pas sans proxy, sinon un
+    /// client peut contourner la limitation des tentatives de connexion.
+    #[arg(long, env = "CREAMOTE_TRUST_FORWARDED_FOR")]
+    trust_forwarded_for: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -135,6 +140,7 @@ async fn main() -> anyhow::Result<()> {
         policy: policy.clone(),
         database_url,
         api_listen,
+        trust_forwarded_for: args.trust_forwarded_for,
     })
     .await?;
 

@@ -22,6 +22,11 @@ const PERM_LABEL = Object.fromEntries(PERMISSIONS);
 const ACTIONS = {
   "auth.login": "Connexion",
   "auth.logout": "Déconnexion",
+  "auth.login_failed": "Échec de connexion",
+  "auth.totp_enable": "Double authentification activée",
+  "auth.totp_disable": "Double authentification désactivée",
+  "auth.totp_reset": "Double authentification réinitialisée",
+  "auth.recovery_code_used": "Code de secours utilisé",
   "user.create": "Utilisateur créé",
   "entity.create": "Entité créée",
   "entity.delete": "Entité supprimée",
@@ -74,9 +79,10 @@ const storage = {
 };
 
 class ApiError extends Error {
-  constructor(status, message) {
+  constructor(status, message, code) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -100,8 +106,12 @@ async function api(method, path, body) {
   }
   const text = await resp.text();
   const data = text ? JSON.parse(text) : null;
-  if (!resp.ok) throw new ApiError(resp.status, data?.message || `Erreur ${resp.status}`);
+  if (!resp.ok) throw new ApiError(resp.status, capitalize(data?.message || `erreur ${resp.status}`), data?.error);
   return data;
+}
+
+function capitalize(m) {
+  return m.charAt(0).toUpperCase() + m.slice(1) + (/[.!?]$/.test(m) ? "" : ".");
 }
 
 const get = (p) => api("GET", p);
@@ -220,15 +230,32 @@ function route() {
 // ------------------------------------------------------------------ vues
 
 function loginView() {
+  const codeField = h("label", { hidden: true }, "Code de l'application d'authentification (ou code de secours)",
+    h("input", { name: "totp_code", inputmode: "numeric", autocomplete: "one-time-code", maxlength: 12 }));
   const form = h("form", { class: "stack card", onsubmit: onSubmit(async (d) => {
-    const r = await api("POST", "/auth/login", { email: d.email, password: d.password })
-      .catch((e) => { throw e.status === 401 ? new Error("E-mail ou mot de passe incorrect.") : e; });
+    const body = { email: d.email, password: d.password };
+    if (!codeField.hidden) body.totp_code = d.totp_code;
+    let r;
+    try {
+      r = await api("POST", "/auth/login", body);
+    } catch (e) {
+      if (e.code === "totp_required") {
+        codeField.hidden = false;
+        codeField.querySelector("input").focus();
+        flash("Saisissez le code de votre application d'authentification.", "info");
+        return;
+      }
+      if (e.code === "totp_invalid") throw new Error("Code incorrect.");
+      if (e.status === 401) throw new Error("E-mail ou mot de passe incorrect.");
+      throw e;
+    }
     storage.set(r.token);
     await loadMe();
     location.hash = "#/";
   }) },
     h("label", {}, "E-mail", h("input", { name: "email", type: "email", required: true, autocomplete: "username", autofocus: true })),
     h("label", {}, "Mot de passe", h("input", { name: "password", type: "password", required: true, autocomplete: "current-password" })),
+    codeField,
     h("button", { class: "primary", type: "submit" }, "Se connecter"));
   return h("main", { class: "login" },
     h("h1", {}, "Creamote"),
@@ -244,8 +271,10 @@ function shell(content) {
       h("a", { class: "brand", href: "#/" }, h("img", { src: "icon.svg", alt: "" }), "Creamote"),
       h("nav", {},
         h("a", { href: "#/" }, "Entités"),
+        h("a", { href: "#/book" }, "Carnet d'adresses"),
         me.user.is_superadmin ? h("a", { href: "#/users" }, "Utilisateurs") : null),
-      h("span", { class: "who" }, me.user.display_name, " · ", me.user.email),
+      h("a", { class: "who", href: "#/account", title: "Mon compte" }, me.user.display_name, " · ", me.user.email,
+        me.totp_enabled ? null : h("span", { class: "pill warn", title: "Double authentification inactive" }, "2FA")),
       h("button", { type: "button", class: "link", onclick: async () => {
         try { await post("/auth/logout"); } catch { /* jeton déjà expiré */ }
         storage.set(null);
@@ -289,10 +318,17 @@ async function usersView() {
   const users = await get("/users");
   return [
     h("h1", {}, "Utilisateurs"),
-    table(["E-mail", "Nom", "Rôle", "État"], users.map((u) => [
+    table(["E-mail", "Nom", "Rôle", "État", "Double authentification", ""], users.map((u) => [
       u.email, u.display_name,
       u.is_superadmin ? h("span", { class: "pill" }, "super-admin") : "",
       u.disabled ? "désactivé" : "actif",
+      u.totp_enabled ? "active" : h("span", { class: "muted" }, "inactive"),
+      u.totp_enabled && u.id !== state.me.user.id
+        ? h("td", { class: "actions" }, dangerButton("Réinitialiser la 2FA", async () => {
+          await post(`/users/${u.id}/totp/reset`);
+          flash(`Double authentification de ${u.email} désactivée et sessions révoquées.`);
+        }))
+        : "",
     ]), "Aucun utilisateur."),
     h("h2", {}, "Nouvel utilisateur"),
     h("form", { class: "inline card", onsubmit: onSubmit(async (d, f) => {
@@ -309,6 +345,95 @@ async function usersView() {
       h("label", {}, "Mot de passe (12 caractères min.)", h("input", { name: "password", type: "password", required: true, minlength: 12, autocomplete: "new-password" })),
       h("label", { class: "check" }, h("input", { name: "superadmin", type: "checkbox" }), "Super-administrateur"),
       h("button", { class: "primary", type: "submit" }, "Créer")),
+  ];
+}
+
+async function accountView() {
+  const me = await loadMe();
+  const content = [h("h1", {}, "Mon compte"),
+    h("p", {}, me.user.display_name, " · ", me.user.email),
+    h("h2", {}, "Double authentification")];
+  if (me.totp_enabled) {
+    content.push(
+      h("p", {}, "Active. Codes de secours restants : ", h("strong", {}, me.recovery_codes_left), "."),
+      me.recovery_codes_left < 3
+        ? h("div", { class: "banner error" }, "Il vous reste peu de codes de secours : désactivez puis réactivez la double authentification pour en obtenir de nouveaux.")
+        : null,
+      h("form", { class: "inline card", onsubmit: onSubmit(async (d) => {
+        await post("/me/totp/disable", { password: d.password, code: d.code });
+        flash("Double authentification désactivée.");
+        await render();
+      }) },
+        h("label", {}, "Mot de passe", h("input", { name: "password", type: "password", required: true, autocomplete: "current-password" })),
+        h("label", {}, "Code actuel ou code de secours", h("input", { name: "code", required: true, autocomplete: "one-time-code" })),
+        h("button", { class: "danger", type: "submit" }, "Désactiver")));
+    return content;
+  }
+  const step = h("div", {});
+  content.push(
+    h("p", { class: "muted" }, "Protégez votre compte avec un code à 6 chiffres généré par une application d'authentification (Aegis, FreeOTP, Google Authenticator, 1Password…)."),
+    step);
+  step.append(h("form", { class: "inline card", onsubmit: onSubmit(async (d) => {
+    const s = await post("/me/totp/setup", { password: d.password });
+    const qr = s.qr_svg ? URL.createObjectURL(new Blob([s.qr_svg], { type: "image/svg+xml" })) : null;
+    step.replaceChildren(h("div", { class: "card" },
+      h("p", {}, "1. Scannez ce QR code avec votre application, ou saisissez la clé à la main."),
+      qr ? h("img", { src: qr, alt: "QR code de configuration", class: "qr", width: 200, height: 200 }) : null,
+      h("p", {}, "Clé : ", h("code", { class: "secret" }, s.secret.match(/.{1,4}/g).join(" "))),
+      h("p", {}, "2. Saisissez le code affiché pour confirmer."),
+      h("form", { class: "inline", onsubmit: onSubmit(async (x) => {
+        const r = await post("/me/totp/enable", { code: x.code });
+        if (qr) URL.revokeObjectURL(qr);
+        state.me = null;
+        step.replaceChildren(h("div", { class: "card" },
+          h("div", { class: "banner info", role: "status" }, "Double authentification active."),
+          h("p", {}, "Codes de secours : chacun ne sert qu'une fois, si vous perdez votre téléphone. Ils ne seront plus affichés : conservez-les en lieu sûr."),
+          h("pre", { class: "codes" }, r.recovery_codes.join("\n")),
+          h("button", { type: "button", class: "primary", onclick: () => render() }, "J'ai noté mes codes")));
+      }) },
+        h("label", {}, "Code", h("input", { name: "code", required: true, inputmode: "numeric", autocomplete: "one-time-code", maxlength: 6, autofocus: true })),
+        h("button", { class: "primary", type: "submit" }, "Activer"))));
+  }) },
+    h("label", {}, "Confirmez votre mot de passe", h("input", { name: "password", type: "password", required: true, autocomplete: "current-password" })),
+    h("button", { class: "primary", type: "submit" }, "Configurer")));
+  return content;
+}
+
+async function bookView() {
+  const entries = await get("/me/address-book");
+  const rows = entries.map((e) => {
+    const cell = h("td", {}, h("strong", {}, e.label), e.notes ? h("div", { class: "muted small" }, e.notes) : null);
+    return [
+      cell,
+      h("td", { class: "nowrap" }, h("code", {}, e.device_id)),
+      h("td", { class: "actions" },
+        h("button", { type: "button", onclick: () => {
+          cell.replaceChildren(h("form", { class: "inline", onsubmit: onSubmit(async (d) => {
+            await patch(`/me/address-book/${e.id}`, { label: d.label, notes: d.notes });
+            await render();
+          }) },
+            h("input", { name: "label", value: e.label, required: true, maxlength: 200, "aria-label": "Nom" }),
+            h("input", { name: "notes", value: e.notes, maxlength: 2000, "aria-label": "Notes" }),
+            h("button", { class: "primary", type: "submit" }, "Enregistrer")));
+        } }, "Modifier"),
+        " ",
+        dangerButton("Supprimer", () => del(`/me/address-book/${e.id}`))),
+    ];
+  });
+  return [
+    h("h1", {}, "Carnet d'adresses"),
+    h("p", { class: "muted" }, "Vos machines hors parc, par leur ID. Personne d'autre ne voit ce carnet."),
+    table(["Machine", "ID", ""], rows, "Carnet vide."),
+    h("h2", {}, "Ajouter"),
+    h("form", { class: "inline card", onsubmit: onSubmit(async (d, f) => {
+      await post("/me/address-book", { label: d.label, device_id: d.device_id, notes: d.notes });
+      f.reset();
+      await render();
+    }) },
+      h("label", {}, "Nom", h("input", { name: "label", required: true, maxlength: 200 })),
+      h("label", {}, "ID (9 chiffres)", h("input", { name: "device_id", required: true, inputmode: "numeric", pattern: "[0-9 ]{9,11}", placeholder: "123 456 789" })),
+      h("label", {}, "Notes", h("input", { name: "notes", maxlength: 2000 })),
+      h("button", { class: "primary", type: "submit" }, "Ajouter")),
   ];
 }
 
@@ -654,6 +779,8 @@ async function render() {
     if (!state.me) await loadMe();
     let content;
     if (parts[0] === "users") content = await usersView();
+    else if (parts[0] === "account") content = await accountView();
+    else if (parts[0] === "book") content = await bookView();
     else if (parts[0] === "e" && parts[1]) content = await entityView(parts[1], parts[2]);
     else content = await entitiesView();
     if (seq !== renderSeq) return;

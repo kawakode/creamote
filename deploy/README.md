@@ -26,7 +26,7 @@ admin.example.org {
 }
 ```
 
-Passez `--relay-addr <hôte>:21400` pour que la console affiche la bonne commande d'enrôlement des machines.
+Passez `--relay-addr <hôte>:21400` pour que la console affiche la bonne commande d'enrôlement des machines, et `--trust-forwarded-for` quand l'API est derrière le reverse proxy (la limitation des tentatives de connexion par adresse IP utilise alors `X-Forwarded-For`). Activez la double authentification sur les comptes d'administration depuis « Mon compte » dans la console.
 
 Créer le premier super-administrateur (le mot de passe est lu sur l'entrée standard) :
 

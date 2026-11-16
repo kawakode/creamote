@@ -17,7 +17,9 @@
 pub mod api;
 pub mod auth;
 pub mod db;
+pub mod limiter;
 pub mod rbac;
+pub mod totp;
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -113,6 +115,9 @@ pub struct Config {
     pub database_url: Option<String>,
     /// Adresse d'écoute HTTP de l'API de gestion (exige `database_url`).
     pub api_listen: Option<SocketAddr>,
+    /// L'API est derrière un reverse proxy : l'adresse du client est lue dans
+    /// `X-Forwarded-For` (limitation des tentatives de connexion, audit).
+    pub trust_forwarded_for: bool,
 }
 
 /// Serveur démarré.
@@ -177,10 +182,17 @@ impl Server {
                         online,
                         server_pin: pin.to_string(),
                         server_address: server_address.clone(),
+                        trust_forwarded_for: config.trust_forwarded_for,
+                        login_limits: Default::default(),
                     },
                 );
                 let task = tokio::spawn(async move {
-                    if let Err(e) = axum::serve(listener, app).await {
+                    if let Err(e) = axum::serve(
+                        listener,
+                        app.into_make_service_with_connect_info::<SocketAddr>(),
+                    )
+                    .await
+                    {
                         tracing::error!("API HTTP arrêtée : {e}");
                     }
                 });
