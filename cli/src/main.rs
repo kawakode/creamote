@@ -84,6 +84,10 @@ enum Command {
         /// Accepte les fichiers envoyés par le host dans ce dossier.
         #[arg(long)]
         files_dir: Option<PathBuf>,
+        /// Écran à recevoir (ID listé à l'acceptation) ; par défaut,
+        /// l'écran principal.
+        #[arg(long)]
+        display: Option<u32>,
     },
     /// Ouvre une session d'API et affiche le jeton (mot de passe lu sur
     /// l'entrée standard).
@@ -174,6 +178,7 @@ async fn main() -> anyhow::Result<()> {
             clipboard,
             send,
             files_dir,
+            display,
         } => {
             let target = DeviceId::parse(&target).context("ID invalide (9 chiffres attendus)")?;
             let addr = tokio::net::lookup_host(&server)
@@ -305,6 +310,19 @@ async fn main() -> anyhow::Result<()> {
                 match ev {
                     Some(Event::Accepted { granted, displays }) => {
                         println!("Session acceptée, permissions {granted:?}.");
+                        for d in &displays {
+                            println!("  écran {} « {} » {}×{}", d.id, d.name, d.width, d.height);
+                        }
+                        if let Some(id) = display {
+                            if displays.iter().any(|d| d.id == id) {
+                                handle.select_display(id, fps, 0).await.ok();
+                            } else {
+                                println!("Écran {id} inconnu, écran principal conservé.");
+                            }
+                        }
+                    }
+                    Some(Event::Displays(displays)) => {
+                        println!("Écrans du host modifiés :");
                         for d in displays {
                             println!("  écran {} « {} » {}×{}", d.id, d.name, d.width, d.height);
                         }

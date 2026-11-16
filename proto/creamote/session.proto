@@ -208,6 +208,14 @@ message SessionEnd {
 // host répond par le VideoConfig effectif puis diffuse des VideoChunk.
 //
 // Numérotation du oneof : 1 à 19 pour M2, 20 à 39 réservés à M3.
+// Multi-écrans (M3) : le host renvoie la liste des écrans quand elle change
+// (écran branché, débranché, résolution modifiée). Si l'écran diffusé
+// disparaît, le host bascule sur l'écran principal et envoie un nouveau
+// VideoConfig.
+message DisplayList {
+  repeated Display displays = 1;
+}
+
 message SessionMessage {
   oneof kind {
     Hello hello = 1;
@@ -228,5 +236,6 @@ message SessionMessage {
     FileEnd file_end = 25;
     FileCancel file_cancel = 26;
     FileResult file_result = 27;
+    DisplayList display_list = 28;
   }
 }

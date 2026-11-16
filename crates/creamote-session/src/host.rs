@@ -14,6 +14,7 @@ use pb::session_message::Kind;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 
+use crate::rate::RateController;
 use crate::sharing::{Active, Sharing};
 use crate::{
     DEFAULT_FPS, EndReason, MAX_FRAMES_IN_FLIGHT, Result, SessionError, chunks, from_proto,
@@ -262,6 +263,11 @@ where
     });
 
     let control = granted.contains(Permissions::CONTROL);
+    let display_watch = tokio::spawn(watch_displays(
+        media.clone(),
+        displays.clone(),
+        out_tx.clone(),
+    ));
     let mut active = Active::start(sharing, granted, out_tx.clone());
     let mut stream: Option<Stream> = None;
     let result = loop {
@@ -299,6 +305,10 @@ where
             Kind::FrameAck(a) => {
                 if let Some(s) = &stream {
                     s.ctl.acked.fetch_max(a.frame_id, Ordering::Relaxed);
+                    let mut acks = s.ctl.acks.lock().expect("verrou sain");
+                    if acks.len() < 256 {
+                        acks.push((a.frame_id, Instant::now()));
+                    }
                 }
             }
             Kind::KeyframeRequest(_) => {
@@ -313,10 +323,35 @@ where
     if let Some(s) = stream.take() {
         s.stop();
     }
+    display_watch.abort();
     drop(active);
     drop(out_tx);
     let _ = writer.await;
     result.map(|()| Summary { granted })
+}
+
+/// Intervalle de vérification de la liste des écrans.
+const DISPLAYS_POLL: Duration = Duration::from_secs(2);
+
+/// Signale au viewer les changements de la liste des écrans.
+async fn watch_displays(media: Media, mut known: Vec<DisplayInfo>, out: mpsc::Sender<Kind>) {
+    loop {
+        tokio::time::sleep(DISPLAYS_POLL).await;
+        let f = media.displays.clone();
+        let Ok(Ok(now)) = tokio::task::spawn_blocking(move || f()).await else {
+            continue;
+        };
+        if now != known {
+            tracing::info!(count = now.len(), "configuration des écrans modifiée");
+            let msg = Kind::DisplayList(pb::DisplayList {
+                displays: now.iter().map(display_proto).collect(),
+            });
+            if out.send(msg).await.is_err() {
+                return;
+            }
+            known = now;
+        }
+    }
 }
 
 enum Input {
@@ -329,6 +364,8 @@ struct StreamCtl {
     stop: AtomicBool,
     acked: AtomicU64,
     keyframe: AtomicBool,
+    /// Accusés reçus (image, instant), pour le débit adaptatif.
+    acks: std::sync::Mutex<Vec<(u64, Instant)>>,
 }
 
 /// Diffusion d'un écran : un thread de capture/encodage et un thread
@@ -376,14 +413,20 @@ fn input_loop(
     events: std_mpsc::Receiver<Input>,
 ) {
     // L'écran est connu une fois la capture ouverte.
-    let Ok(display) = display.recv() else {
+    let Ok(mut current) = display.recv() else {
         return;
     };
     let mut sink: Option<Box<dyn InputSink>> = None;
     let mut failed = false;
     while let Ok(ev) = events.recv() {
+        // La capture a basculé sur un autre écran : nouvelle cible.
+        while let Ok(d) = display.try_recv() {
+            current = d;
+            sink = None;
+            failed = false;
+        }
         if sink.is_none() && !failed {
-            match (media.injector)(display.clone()) {
+            match (media.injector)(current.clone()) {
                 Ok(s) => sink = Some(s),
                 Err(e) => {
                     tracing::warn!("injection d'entrées impossible : {e}");
@@ -412,8 +455,9 @@ fn video_loop(
     let mut capturer = (media.capturer)(Some(req.display_id))
         .or_else(|_| (media.capturer)(None))
         .map_err(|e| e.to_string())?;
-    let display = capturer.display().clone();
+    let mut display = capturer.display().clone();
     let _ = display_tx.send(display.clone());
+    let mut reopened: Option<Instant> = None;
     let fps = match req.max_fps {
         0 => DEFAULT_FPS,
         f => f.clamp(1, 60),
@@ -421,6 +465,7 @@ fn video_loop(
     let interval = Duration::from_secs(1) / fps;
     let start = Instant::now();
     let mut encoder: Option<creamote_codec::Chain> = None;
+    let mut rate: Option<(RateController, pb::VideoConfig)> = None;
     let mut last: Option<Frame> = None;
     let mut sent: u64 = 0;
     let mut last_sent = start.checked_sub(interval).unwrap_or(start);
@@ -435,10 +480,23 @@ fn video_loop(
             std::thread::sleep(wait);
         }
         let mut force = ctl.keyframe.swap(false, Ordering::Relaxed);
-        match capturer
-            .next_frame(Duration::from_millis(100))
-            .map_err(|e| e.to_string())?
-        {
+        let captured = match capturer.next_frame(Duration::from_millis(100)) {
+            Ok(c) => c,
+            // Écran débranché ou reconfiguré : on rouvre l'écran principal
+            // (une fois ; un second échec rapproché met fin au flux).
+            Err(e) if reopened.is_none_or(|t| t.elapsed() > Duration::from_secs(5)) => {
+                tracing::info!("capture interrompue ({e}), bascule sur l'écran principal");
+                capturer = (media.capturer)(None).map_err(|e| e.to_string())?;
+                display = capturer.display().clone();
+                let _ = display_tx.send(display.clone());
+                reopened = Some(Instant::now());
+                encoder = None;
+                last = None;
+                continue;
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+        match captured {
             Some(f) => last = Some(f),
             // Écran inchangé : on ne réencode la dernière image que si le
             // viewer a demandé une image clé.
@@ -473,19 +531,44 @@ fn video_loop(
                 max_fps: fps,
                 encoder: e.name(),
             };
-            if out.blocking_send(Kind::VideoConfig(config)).is_err() {
+            if out
+                .blocking_send(Kind::VideoConfig(config.clone()))
+                .is_err()
+            {
                 return Ok(());
             }
+            ctl.acks.lock().expect("verrou sain").clear();
+            rate = Some((RateController::new(cfg.bitrate_bps, Instant::now()), config));
             encoder = Some(e);
             force = true;
         }
         let Some(enc) = encoder.as_mut() else {
             continue;
         };
+        if let Some((rc, config)) = &mut rate {
+            for (id, at) in ctl.acks.lock().expect("verrou sain").drain(..) {
+                rc.on_ack(id, at);
+            }
+            if let Some(bps) = rc.tick(Instant::now()) {
+                tracing::info!(kbit_s = bps / 1000, "débit adaptatif");
+                enc.set_bitrate(bps);
+                config.target_bitrate_bps = bps;
+                // Informatif pour le viewer (affichage du débit).
+                if out
+                    .blocking_send(Kind::VideoConfig(config.clone()))
+                    .is_err()
+                {
+                    return Ok(());
+                }
+            }
+        }
         let encoded = enc.encode(frame, force).map_err(|e| e.to_string())?;
         last_sent = Instant::now();
         for e in encoded {
             sent += 1;
+            if let Some((rc, _)) = &mut rate {
+                rc.on_sent(sent, e.data.len(), last_sent);
+            }
             let ts = e.captured_at.saturating_duration_since(start).as_micros() as u64;
             for c in chunks(display.id, sent, e.keyframe, ts, &e.data) {
                 if out.blocking_send(Kind::VideoChunk(c)).is_err() {

@@ -45,8 +45,11 @@ pub enum Event {
         granted: Permissions,
         displays: Vec<pb::Display>,
     },
-    /// Paramètres du flux vidéo (au début et à chaque changement de taille).
+    /// Paramètres du flux vidéo (au début, à chaque changement de taille,
+    /// d'écran ou de débit).
     Video(pb::VideoConfig),
+    /// La liste des écrans du host a changé.
+    Displays(Vec<pb::Display>),
     /// Image complète ; à acquitter avec [`Handle::ack`] une fois décodée.
     Frame(VideoFrame),
     /// Transfert de fichiers accordé : envois vers le host et réponses aux
@@ -222,6 +225,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 }
             }
             Kind::VideoConfig(c) => Event::Video(c),
+            Kind::DisplayList(l) => Event::Displays(l.displays),
             Kind::VideoChunk(c) => match frames.push(c)? {
                 Some(f) => Event::Frame(f),
                 None => continue,

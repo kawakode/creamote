@@ -132,22 +132,18 @@ class Session {
       case "connected":
         $("code").textContent = ev.code;
         break;
-      case "accepted": {
+      case "accepted":
         this.control = ev.granted.includes("control");
-        const sel = $("displays");
-        sel.replaceChildren(...ev.displays.map((d) => {
-          const o = document.createElement("option");
-          o.value = d.id;
-          o.textContent = `${d.name} (${d.width}×${d.height})`;
-          o.selected = d.primary;
-          return o;
-        }));
-        sel.hidden = ev.displays.length < 2;
+        this.showDisplays(ev.displays, (d) => d.primary);
         $("peer").textContent += this.control ? " · contrôle" : " · vue seule";
         break;
-      }
+      case "displays":
+        // Écran branché ou débranché chez le host.
+        this.showDisplays(ev.displays, (d) => d.id === this.displayId);
+        break;
       case "video":
         this.displayId = ev.displayId;
+        $("displays").value = ev.displayId;
         this.encoder = ev.encoder;
         $("waiting").hidden = true;
         break;
@@ -155,6 +151,18 @@ class Session {
         end(END_MESSAGES[ev.reason] || ev.message || "Session terminée.", ev.reason !== "Closed");
         break;
     }
+  }
+
+  showDisplays(displays, isSelected) {
+    const sel = $("displays");
+    sel.replaceChildren(...displays.map((d) => {
+      const o = document.createElement("option");
+      o.value = d.id;
+      o.textContent = `${d.name} (${d.width}×${d.height})`;
+      o.selected = isSelected(d);
+      return o;
+    }));
+    sel.hidden = displays.length < 2;
   }
 
   onFrame(msg) {
