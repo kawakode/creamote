@@ -14,6 +14,11 @@ message RegisterPeer {
   creamote.common.v1.Version version = 3;
   // Adresses locales (LAN) annoncées pour la tentative de connexion directe.
   repeated string local_addrs = 4;
+  // Preuve de possession de la clé d'identité : signature Ed25519 de
+  // "creamote/register/v1" || exporteur TLS de la connexion QUIC (RFC 5705,
+  // label "EXPORTER-creamote-register", 32 octets). Liée à la connexion, elle
+  // ne peut pas être rejouée sur une autre.
+  bytes proof = 5;
 }
 
 message RegisterPeerResponse {
@@ -23,6 +28,7 @@ message RegisterPeerResponse {
     STATUS_ID_CONFLICT = 2;
     STATUS_RATE_LIMITED = 3;
     STATUS_VERSION_UNSUPPORTED = 4;
+    STATUS_INVALID_PROOF = 5;
   }
   Status status = 1;
   // ID affiché à l'utilisateur, dérivé de la clé publique.
@@ -48,6 +54,9 @@ message ConnectRequest {
   creamote.common.v1.DeviceIdentity requester = 2;
   // Ticket signé par le serveur de gestion (mode géré), vide sinon.
   bytes session_ticket = 3;
+  // Choisi par le demandeur pour corréler la réponse (RelayGrant ou
+  // ConnectRejected).
+  uint64 request_id = 4;
 }
 
 // Le serveur relaie l'offre au host, avec les adresses du demandeur.
@@ -69,9 +78,36 @@ message ConnectAnswer {
 // Si le P2P échoue, les deux pairs rejoignent le relay avec ce jeton.
 message RelayGrant {
   bytes session_id = 1;
+  // Adresse du relay ; vide = même adresse que le serveur de rendezvous.
   string relay_addr = 2;
   bytes relay_token = 3;
+  // Délai pour rejoindre le relay.
   uint32 expires_in_seconds = 4;
+  // request_id du ConnectRequest d'origine (côté demandeur), 0 côté host.
+  uint64 request_id = 5;
+  // Durée maximale de la session relay, 0 = illimitée.
+  uint32 max_session_seconds = 6;
+}
+
+message ConnectRejected {
+  enum Reason {
+    REASON_UNSPECIFIED = 0;
+    REASON_TARGET_OFFLINE = 1;
+    REASON_DECLINED = 2;
+    REASON_RELAY_FULL = 3;
+    REASON_NOT_REGISTERED = 4;
+    REASON_INVALID_REQUEST = 5;
+  }
+  uint64 request_id = 1;
+  Reason reason = 2;
+}
+
+// Premier message d'un flux relay : le pair présente son jeton. Une fois les
+// deux côtés présents, le relay recopie les octets d'un flux à l'autre sans
+// les interpréter (ils sont chiffrés par Noise de bout en bout).
+message RelayJoin {
+  bytes session_id = 1;
+  bytes relay_token = 2;
 }
 
 message RendezvousMessage {
@@ -82,5 +118,7 @@ message RendezvousMessage {
     ConnectOffer connect_offer = 4;
     ConnectAnswer connect_answer = 5;
     RelayGrant relay_grant = 6;
+    ConnectRejected connect_rejected = 7;
+    RelayJoin relay_join = 8;
   }
 }

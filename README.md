@@ -13,13 +13,27 @@ Client et host choisissent leur serveur : un serveur auto-hébergé, ou le serve
 
 ## État
 
-Milestone **M0 : fondations**. Voir [docs/architecture.md](docs/architecture.md) pour la feuille de route.
+Milestone **M1 : rendezvous et relay**. Voir [docs/architecture.md](docs/architecture.md) pour la feuille de route.
 
-- `proto/` : schémas protobuf (rendezvous, session).
+- `proto/` : schémas protobuf (rendezvous, relay, session).
 - `crates/creamote-proto` : types générés et framing des messages.
 - `crates/creamote-crypto` : identité d'appareil (Ed25519 + clé Noise X25519 liée), ID à 9 chiffres, empreinte, handshake Noise XX authentifié et canal chiffré.
-- `host/` : crée ou recharge l'identité de l'appareil et affiche son ID.
-- `server/` : squelette (rendezvous et relay en M1).
+- `crates/creamote-net` : QUIC avec certificat de serveur épinglé, client de rendezvous, connexion au relay, canal chiffré de bout en bout.
+- `server/` : rendezvous + relay, mode public avec limites (voir [deploy/](deploy/README.md)).
+- `host/` : s'enregistre et accepte les sessions (écho chiffré en attendant la capture d'écran de M2).
+- `cli/` : `creamote-cli`, outil de test des connexions.
+
+## Essai local
+
+```sh
+cargo run -p creamote-server -- --listen 127.0.0.1:21400
+# noter l'empreinte affichée, puis dans un 2e terminal :
+cargo run -p creamote-host -- --server 127.0.0.1:21400 --server-pin <empreinte>
+# noter l'ID du host, puis dans un 3e terminal :
+cargo run -p creamote-cli -- connect "<ID>" --server 127.0.0.1:21400 --server-pin <empreinte>
+```
+
+Chaque ligne tapée dans le client traverse le relay chiffrée de bout en bout et revient en écho du host. Les deux côtés affichent le même code de vérification.
 
 ## Développement
 
@@ -27,5 +41,4 @@ Prérequis : Rust stable (voir `rust-toolchain.toml`). Aucun `protoc` n'est néc
 
 ```sh
 cargo test --workspace
-cargo run -p creamote-host -- --identity-file ./dev.identity
 ```

@@ -1,0 +1,4 @@
+target
+.git
+client/node_modules
+android/.gradle

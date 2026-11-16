@@ -8,6 +8,12 @@ publish.workspace = true
 
 [dependencies]
 creamote-crypto.workspace = true
+creamote-net.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+anyhow.workspace = true
 
 [lints]
 workspace = true

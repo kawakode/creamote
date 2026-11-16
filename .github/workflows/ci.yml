@@ -37,3 +37,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --locked
       - run: cargo test --workspace --locked
+
+  docker:
+    name: image du serveur
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f deploy/Dockerfile -t creamote-server:ci .
+      - name: démarrage de l'image
+        run: |
+          docker run -d --name crs creamote-server:ci
+          sleep 3
+          docker logs crs
+          docker logs crs | grep -q "Empreinte"
