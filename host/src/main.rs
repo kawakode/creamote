@@ -163,8 +163,21 @@ async fn main() -> anyhow::Result<()> {
         }
         None => println!("Non enrôlé : chaque demande est soumise à l'utilisateur présent."),
     }
+    // Plafond de débit du relay (serveur public) : l'encodeur reste un peu
+    // en dessous pour ne pas remplir la file du relay.
+    let relay_bitrate_cap = rv
+        .registration()
+        .policy
+        .as_ref()
+        .map(|p| p.max_relay_bitrate_bps)
+        .filter(|&bps| bps > 0)
+        .map(|bps| u32::try_from(bps * 9 / 10).unwrap_or(u32::MAX));
+    if let Some(bps) = relay_bitrate_cap {
+        println!("Débit du relay limité : {} kbit/s", bps / 900);
+    }
     let ctx = Ctx {
         identity: Arc::new(identity),
+        relay_bitrate_cap,
         enrollment,
         media: Media::native(args.encoder),
         unattended_dev: args.unattended_dev,
@@ -176,6 +189,7 @@ async fn main() -> anyhow::Result<()> {
 
 struct Ctx {
     identity: Arc<DeviceIdentity>,
+    relay_bitrate_cap: Option<u32>,
     enrollment: Option<Enrollment>,
     media: Media,
     unattended_dev: bool,
@@ -352,6 +366,12 @@ async fn session(
     ctx: &Ctx,
 ) -> anyhow::Result<host::Summary> {
     let (chan, path) = open_channel(&connector, &grant, &expected, &ctx.identity).await?;
+    let mut media = ctx.media.clone();
+    if path == PeerPath::Relay
+        && let Some(cap) = ctx.relay_bitrate_cap
+    {
+        media.max_bitrate_bps = cap;
+    }
     let path = match path {
         PeerPath::Direct => "connexion directe",
         PeerPath::Relay => "via le relay",
@@ -362,5 +382,5 @@ async fn session(
         chan.verification_code()
     );
     let (tx, rx) = chan.split();
-    Ok(host::serve_with(tx, rx, policy, ctx.media.clone(), ctx.sharing()).await?)
+    Ok(host::serve_with(tx, rx, policy, media, ctx.sharing()).await?)
 }

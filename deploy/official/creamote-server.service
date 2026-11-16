@@ -1,0 +1,56 @@
+# Unité systemd du serveur officiel (binaire dans /usr/local/bin).
+#   useradd --system --home-dir /var/lib/creamote creamote
+#   install -m 0644 creamote-server.service /etc/systemd/system/
+#   systemctl daemon-reload && systemctl enable --now creamote-server
+#   journalctl -u creamote-server | grep Empreinte
+[Unit]
+Description=Creamote, serveur officiel (rendezvous et relay)
+Documentation=https://github.com/kawakode/creamote/blob/main/deploy/official/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=creamote
+Group=creamote
+StateDirectory=creamote
+StateDirectoryMode=0700
+Environment=RUST_LOG=info
+# Remplacer relay.example.org par le nom DNS public du serveur.
+ExecStart=/usr/local/bin/creamote-server --public \
+    --listen [::]:21400 \
+    --data-dir /var/lib/creamote \
+    --relay-addr relay.example.org:21400 \
+    --metrics-listen 127.0.0.1:21402
+Restart=always
+RestartSec=2
+LimitNOFILE=65536
+
+# Durcissement : le serveur n'a besoin que de son dossier de données et du
+# réseau.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

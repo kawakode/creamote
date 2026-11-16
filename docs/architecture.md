@@ -55,7 +55,9 @@ Wayland n'autorise ni capture ni injection directes : le host passe par **xdg-de
 
 ## Serveur officiel et serveurs custom
 
-Un seul binaire `creamote-server`. En mode `public` il applique une `ServerPolicy` (au relay seulement, une connexion directe ne coûtant rien au serveur) : **une session relay à la fois par adresse IP du demandeur**, **10 minutes maximum par session** et 200 sessions au total, valeurs réglables. Le serveur officiel n'offre pas la gestion de parc (comptes, entités, RBAC) : elle est réservée aux serveurs auto-hébergés. Le plafond de débit et la limitation de l'enregistrement d'IDs arrivent en M6. Client et host conservent une liste de serveurs, chacun épinglé par son empreinte.
+Un seul binaire `creamote-server`. En mode `public` il applique une `ServerPolicy` (au relay seulement, une connexion directe ne coûtant rien au serveur) : **une session relay à la fois par adresse IP du demandeur**, **10 minutes maximum par session**, **5 Mbit/s par sens** et 200 sessions au total, valeurs réglables. Le serveur officiel n'offre pas la gestion de parc (comptes, entités, RBAC) : elle est réservée aux serveurs auto-hébergés. Client et host conservent une liste de serveurs, chacun épinglé par son empreinte.
+
+Protection du serveur public (M6, `server/src/ratelimit.rs`) : par adresse IP (préfixe /64 en IPv6), au plus 32 connexions QUIC simultanées (refusées avant le handshake), 20 enregistrements et 30 demandes de session par minute (`STATUS_RATE_LIMITED`, `REASON_RATE_LIMITED`) ; la dernière limite empêche aussi de balayer les ID pour trouver les appareils en ligne. Le relay plafonne chaque sens d'une session par un seau à jetons (rafale de 250 ms) : les octets en trop restent dans les tampons QUIC, le contrôle de flux ralentit l'émetteur et le débit adaptatif du host réagit. Le plafond est annoncé dans `ServerPolicy.max_relay_bitrate_bps` ; le host règle son encodeur à 90 % de cette valeur quand la session passe par le relay. Métriques Prometheus sans donnée personnelle (`--metrics-listen`). Déploiement : [deploy/official](../deploy/official/README.md).
 
 ## Gestion de parc (M4)
 

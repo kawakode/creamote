@@ -11,8 +11,18 @@ use creamote_net::relay::RelayStream;
 use creamote_net::rendezvous::{Event, RegisterOptions, RendezvousClient};
 use creamote_net::secure::SecureChannel;
 use creamote_net::tls::ServerPin;
-use creamote_net::{NetError, RejectReason};
+use creamote_net::{NetError, RegisterStatus, RejectReason};
 use creamote_server::{Config, Policy, Server};
+
+/// Mode public sans les limites par minute (les tests ouvrent beaucoup de
+/// sessions depuis 127.0.0.1).
+fn public() -> Policy {
+    Policy {
+        registrations_per_ip_per_minute: 0,
+        connect_requests_per_ip_per_minute: 0,
+        ..Policy::public()
+    }
+}
 
 async fn start(policy: Policy) -> (Server, SocketAddr, ServerPin) {
     let server = Server::start(Config {
@@ -135,7 +145,7 @@ async fn wrong_server_pin_is_refused() {
 
 #[tokio::test]
 async fn public_mode_caps_concurrent_relay_sessions() {
-    let mut policy = Policy::public();
+    let mut policy = public();
     policy.max_relay_sessions = 1;
     policy.max_relay_sessions_per_ip = 0;
     let (_server, addr, pin) = start(policy).await;
@@ -151,7 +161,7 @@ async fn public_mode_caps_concurrent_relay_sessions() {
 
 #[tokio::test]
 async fn public_mode_allows_one_relay_session_per_ip() {
-    let (_server, addr, pin) = start(Policy::public()).await;
+    let (_server, addr, pin) = start(public()).await;
     let host = spawn_host(addr, pin, true).await;
 
     let (first, rv1) = open_session(addr, pin, host).await.unwrap();
@@ -177,7 +187,7 @@ async fn public_mode_allows_one_relay_session_per_ip() {
 
 #[tokio::test]
 async fn public_mode_cuts_sessions_after_max_duration() {
-    let mut policy = Policy::public();
+    let mut policy = public();
     policy.max_relay_seconds = 1;
     let (_server, addr, pin) = start(policy).await;
     let host = spawn_host(addr, pin, true).await;
@@ -189,4 +199,108 @@ async fn public_mode_cuts_sessions_after_max_duration() {
     // Le relay coupe la session : la lecture se termine (fin ou erreur).
     let ended = tokio::time::timeout(Duration::from_secs(5), chan.recv()).await;
     assert!(matches!(ended, Ok(Ok(None)) | Ok(Err(_))));
+}
+
+#[tokio::test]
+async fn public_mode_limits_registrations_per_ip() {
+    let mut policy = public();
+    policy.registrations_per_ip_per_minute = 3;
+    let (_server, addr, pin) = start(policy).await;
+    let mut clients = Vec::new();
+    for _ in 0..3 {
+        let id = DeviceIdentity::generate();
+        clients.push(RendezvousClient::register(addr, pin, &id).await.unwrap());
+    }
+    let id = DeviceIdentity::generate();
+    let err = RendezvousClient::register(addr, pin, &id)
+        .await
+        .err()
+        .unwrap();
+    assert!(
+        matches!(err, NetError::Registration(RegisterStatus::RateLimited)),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn public_mode_limits_connect_requests_per_ip() {
+    let mut policy = public();
+    policy.connect_requests_per_ip_per_minute = 2;
+    let (_server, addr, pin) = start(policy).await;
+    let viewer = DeviceIdentity::generate();
+    let mut rv = RendezvousClient::register(addr, pin, &viewer)
+        .await
+        .unwrap();
+    // Balayage d'ID : les premiers sont « hors ligne », puis refusés.
+    for _ in 0..2 {
+        let ghost = DeviceIdentity::generate().device_id();
+        let err = rv.request_session(ghost).await.err().unwrap();
+        assert!(matches!(
+            err,
+            NetError::Rejected(RejectReason::TargetOffline)
+        ));
+    }
+    let ghost = DeviceIdentity::generate().device_id();
+    let err = rv.request_session(ghost).await.err().unwrap();
+    assert!(
+        matches!(err, NetError::Rejected(RejectReason::RateLimited)),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn public_mode_limits_connections_per_ip() {
+    let mut policy = public();
+    policy.max_connections_per_ip = 2;
+    let (_server, addr, pin) = start(policy).await;
+    let a = DeviceIdentity::generate();
+    let b = DeviceIdentity::generate();
+    let ra = RendezvousClient::register(addr, pin, &a).await.unwrap();
+    let _rb = RendezvousClient::register(addr, pin, &b).await.unwrap();
+    let c = DeviceIdentity::generate();
+    assert!(RendezvousClient::register(addr, pin, &c).await.is_err());
+    // Une connexion fermée libère sa place.
+    ra.close();
+    let mut ok = false;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if RendezvousClient::register(addr, pin, &c).await.is_ok() {
+            ok = true;
+            break;
+        }
+    }
+    assert!(ok, "la place de la connexion n'a pas été libérée");
+}
+
+#[tokio::test]
+async fn relay_caps_bitrate_per_direction() {
+    let mut policy = public();
+    // 800 kbit/s = 100 Ko/s par sens.
+    policy.max_relay_bitrate_bps = 800_000;
+    let (server, addr, pin) = start(policy).await;
+    let host = spawn_host(addr, pin, true).await;
+    let (mut chan, _rv) = open_session(addr, pin, host).await.unwrap();
+
+    // 300 Ko aller (et autant en écho) : au moins ~2 s une fois la rafale
+    // de 250 ms consommée.
+    let started = std::time::Instant::now();
+    let chunk = vec![1u8; 30_000];
+    for _ in 0..10 {
+        chan.send(&chunk).await.unwrap();
+        chan.recv().await.unwrap().unwrap();
+    }
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(1800),
+        "300 Ko passés en {elapsed:?} malgré le plafond"
+    );
+    assert!(elapsed < Duration::from_secs(10), "trop lent : {elapsed:?}");
+
+    let metrics = server.metrics_text();
+    assert!(
+        metrics.contains("\ncreamote_relay_sessions_active 1\n"),
+        "{metrics}"
+    );
+    assert!(metrics.contains("\ncreamote_relay_sessions_total 1\n"));
+    assert!(!metrics.contains("\ncreamote_relay_bytes_total 0\n"));
 }

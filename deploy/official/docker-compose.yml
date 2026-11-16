@@ -1,0 +1,39 @@
+# Serveur officiel (mode public) : rendezvous + relay, sans gestion de parc.
+#   docker compose -f deploy/official/docker-compose.yml up -d
+#   docker compose -f deploy/official/docker-compose.yml logs creamote-public   # empreinte
+#
+# Réseau de l'hôte : les limites par adresse IP et la connexion directe
+# exigent de voir l'adresse réelle des pairs, sans traduction par Docker.
+services:
+  creamote-public:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      # Contient le certificat : le perdre change l'empreinte publiée.
+      - creamote-public-data:/data
+    command:
+      - --public
+      - --relay-addr
+      - ${CREAMOTE_PUBLIC_HOST:?nom DNS public du serveur, ex. relay.example.org}:21400
+      # Métriques Prometheus, sur la boucle locale uniquement.
+      - --metrics-listen
+      - 127.0.0.1:21402
+      # Limites (valeurs par défaut du mode public, à ajuster) :
+      - --max-relay-sessions
+      - "200"
+      - --max-relay-sessions-per-ip
+      - "1"
+      - --max-relay-seconds
+      - "600"
+      - --max-relay-kbps
+      - "5000"
+    environment:
+      RUST_LOG: info
+    ulimits:
+      nofile: 65536
+
+volumes:
+  creamote-public-data:
