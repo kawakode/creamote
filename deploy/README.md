@@ -28,6 +28,8 @@ admin.example.org {
 
 Passez `--relay-addr <hôte>:21400` pour que la console affiche la bonne commande d'enrôlement des machines, et `--trust-forwarded-for` quand l'API est derrière le reverse proxy (la limitation des tentatives de connexion par adresse IP utilise alors `X-Forwarded-For`). Activez la double authentification sur les comptes d'administration depuis « Mon compte » dans la console.
 
+SSO d'entreprise (Keycloak, Entra ID, Google Workspace, Authentik…) : déclarez un client OIDC « confidentiel » avec l'URL de retour `https://admin.example.org/api/v1/auth/oidc/callback`, puis lancez le serveur avec `--public-url https://admin.example.org --oidc-issuer <URL de l'émetteur> --oidc-client-id <id> --oidc-name "Nom affiché"` et le secret dans `CREAMOTE_OIDC_CLIENT_SECRET`. Les comptes doivent exister dans Creamote avec la même adresse e-mail (voir [docs/api.md](../docs/api.md)).
+
 Créer le premier super-administrateur (le mot de passe est lu sur l'entrée standard) :
 
 ```sh

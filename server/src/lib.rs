@@ -18,6 +18,7 @@ pub mod api;
 pub mod auth;
 pub mod db;
 pub mod limiter;
+pub mod oidc;
 pub mod rbac;
 pub mod totp;
 
@@ -118,6 +119,8 @@ pub struct Config {
     /// L'API est derrière un reverse proxy : l'adresse du client est lue dans
     /// `X-Forwarded-For` (limitation des tentatives de connexion, audit).
     pub trust_forwarded_for: bool,
+    /// Connexion OpenID Connect à la console et à l'API.
+    pub oidc: Option<oidc::OidcConfig>,
 }
 
 /// Serveur démarré.
@@ -184,6 +187,10 @@ impl Server {
                         server_address: server_address.clone(),
                         trust_forwarded_for: config.trust_forwarded_for,
                         login_limits: Default::default(),
+                        oidc: match &config.oidc {
+                            Some(c) => Some(Arc::new(oidc::Oidc::new(c.clone())?)),
+                            None => None,
+                        },
                     },
                 );
                 let task = tokio::spawn(async move {
