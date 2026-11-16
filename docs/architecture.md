@@ -68,6 +68,13 @@ Un seul binaire `creamote-server`. En mode `public` il applique une `ServerPolic
 
 Protection du serveur public (M6, `server/src/ratelimit.rs`) : par adresse IP (préfixe /64 en IPv6), au plus 32 connexions QUIC simultanées (refusées avant le handshake), 20 enregistrements et 30 demandes de session par minute (`STATUS_RATE_LIMITED`, `REASON_RATE_LIMITED`) ; la dernière limite empêche aussi de balayer les ID pour trouver les appareils en ligne. Le relay plafonne chaque sens d'une session par un seau à jetons (rafale de 250 ms) : les octets en trop restent dans les tampons QUIC, le contrôle de flux ralentit l'émetteur et le débit adaptatif du host réagit. Le plafond est annoncé dans `ServerPolicy.max_relay_bitrate_bps` ; le host règle son encodeur à 90 % de cette valeur quand la session passe par le relay. Métriques Prometheus sans donnée personnelle (`--metrics-listen`). Déploiement : [deploy/official](../deploy/official/README.md).
 
+## Distribution (M6)
+
+- **Host installé** : service Windows qui lance le host dans la session de la console, agent launchd sous macOS, service utilisateur systemd sous Linux ([ADR 0004](adr/0004-host-service.md)). Configuration système `host.conf` (`creamote-host configure`), enrôlement automatique par jeton, reconnexion au serveur.
+- **Paquets** : MSI (WiX), pkg (signé et notarisé), deb/rpm (nfpm) pour le host ; MSI/NSIS, dmg, deb/rpm/AppImage pour le client (Tauri) ; image Docker et archive pour le serveur. Workflow de release sur étiquette, signatures facultatives ([docs/release.md](release.md)).
+- **Mise à jour** : manifeste `host-latest.json` signé (minisign), version strictement plus récente uniquement, paquet vérifié par SHA-256 puis installé par l'installeur du système ; greffon updater de Tauri pour le client, même clé.
+- **Déploiement de masse** : propriétés MSI, `configure` pour MDM et Ansible, jetons d'enrôlement à usages multiples ([deploy/mass](../deploy/mass/README.md)).
+
 ## Gestion de parc (M4)
 
 Disponible sur les serveurs auto-hébergés (pas sur le serveur officiel). Données en SQLite par défaut ou PostgreSQL, API HTTP décrite dans [api.md](api.md).

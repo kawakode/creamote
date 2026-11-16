@@ -1,0 +1,38 @@
+# Déploiement du host Creamote sur un parc Linux (Debian/Ubuntu ou
+# Fedora/RHEL) avec Ansible.
+#
+#   ansible-playbook -i inventaire deploy/mass/ansible-creamote-host.yml \
+#     -e creamote_version=0.2.0 \
+#     -e creamote_server=relay.example.org:21400 \
+#     -e creamote_server_pin=<empreinte> \
+#     -e creamote_enroll_token=<jeton>      # de préférence via ansible-vault
+- name: Host Creamote
+  hosts: all
+  become: true
+  vars:
+    creamote_release: "https://github.com/kawakode/creamote/releases/download/v{{ creamote_version }}"
+  tasks:
+    - name: Paquet (Debian, Ubuntu)
+      ansible.builtin.apt:
+        deb: "{{ creamote_release }}/creamote-host_{{ creamote_version }}_amd64.deb"
+      when: ansible_facts.pkg_mgr == "apt"
+
+    - name: Paquet (Fedora, RHEL)
+      ansible.builtin.dnf:
+        name: "{{ creamote_release }}/creamote-host-{{ creamote_version }}-1.x86_64.rpm"
+        disable_gpg_check: true  # paquet vérifié par SHA256SUMS, non signé GPG
+      when: ansible_facts.pkg_mgr in ["dnf", "dnf5", "yum"]
+
+    - name: Configuration (serveur et jeton d'enrôlement)
+      ansible.builtin.command:
+        argv:
+          - creamote-host
+          - configure
+          - --server
+          - "{{ creamote_server }}"
+          - --server-pin
+          - "{{ creamote_server_pin }}"
+          - --enroll-token
+          - "{{ creamote_enroll_token }}"
+      no_log: true
+      changed_when: true

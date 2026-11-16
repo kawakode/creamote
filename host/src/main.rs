@@ -103,6 +103,10 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Écrit les options dans le fichier de configuration système (ou
+    /// `--config`) : utilisé par les installeurs et les outils de
+    /// déploiement. Une option vide ou absente n'est pas modifiée.
+    Configure(Box<ConfigureArgs>),
     /// Vérifie la présence d'une nouvelle version signée et l'installe
     /// (droits administrateur requis). Lancé périodiquement par le service.
     Update {
@@ -115,6 +119,55 @@ enum Command {
         #[command(subcommand)]
         action: ServiceAction,
     },
+}
+
+#[derive(clap::Args)]
+struct ConfigureArgs {
+    #[arg(long)]
+    server: Option<String>,
+    #[arg(long)]
+    server_pin: Option<String>,
+    #[arg(long)]
+    enroll_token: Option<String>,
+    #[arg(long)]
+    name: Option<String>,
+    #[arg(long)]
+    relay_only: Option<String>,
+    #[arg(long)]
+    clipboard: Option<String>,
+    #[arg(long)]
+    file_transfer: Option<String>,
+    #[arg(long)]
+    auto_update: Option<String>,
+    #[arg(long)]
+    update_url: Option<String>,
+}
+
+impl ConfigureArgs {
+    fn values(&self) -> anyhow::Result<Vec<(&'static str, String)>> {
+        fn set(v: &Option<String>) -> Option<&str> {
+            v.as_deref().map(str::trim).filter(|v| !v.is_empty())
+        }
+        if let Some(pin) = set(&self.server_pin) {
+            pin.parse::<ServerPin>()
+                .map_err(|e| anyhow::anyhow!("empreinte du serveur invalide : {e}"))?;
+        }
+        let fields: [(&'static str, &Option<String>); 9] = [
+            ("server", &self.server),
+            ("server_pin", &self.server_pin),
+            ("enroll_token", &self.enroll_token),
+            ("name", &self.name),
+            ("relay_only", &self.relay_only),
+            ("clipboard", &self.clipboard),
+            ("file_transfer", &self.file_transfer),
+            ("auto_update", &self.auto_update),
+            ("update_url", &self.update_url),
+        ];
+        Ok(fields
+            .into_iter()
+            .filter_map(|(k, v)| set(v).map(|v| (k, v.replace(['\r', '\n'], " "))))
+            .collect())
+    }
 }
 
 #[derive(Subcommand)]
@@ -196,6 +249,23 @@ impl Settings {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if let Some(Command::Configure(c)) = &args.command {
+        let path = args
+            .config
+            .clone()
+            .unwrap_or_else(config::system_config_file);
+        let values = c.values()?;
+        #[cfg(windows)]
+        if args.config.is_none() {
+            // Avant le premier démarrage du service : le dossier contiendra
+            // la clé de la machine.
+            service::windows::secure_data_dir()?;
+        }
+        config::write_options(&path, &values)?;
+        let keys: Vec<_> = values.iter().map(|(k, _)| *k).collect();
+        println!("{} : {}", path.display(), keys.join(", "));
+        return Ok(());
+    }
     if let Some(Command::Update { check }) = &args.command {
         let path = args
             .config

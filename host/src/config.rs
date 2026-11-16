@@ -88,6 +88,54 @@ impl HostConfig {
     }
 }
 
+/// Remplace (ou ajoute) les options `values` dans le texte d'un fichier de
+/// configuration, en gardant les commentaires et les autres options.
+pub fn set_options(text: &str, values: &[(&str, String)]) -> String {
+    let mut out = Vec::new();
+    let mut done = vec![false; values.len()];
+    for line in text.lines() {
+        let key = line
+            .trim()
+            .split_once('=')
+            .filter(|_| !line.trim_start().starts_with('#'))
+            .map(|(k, _)| k.trim());
+        match key.and_then(|k| values.iter().position(|(name, _)| *name == k)) {
+            Some(i) if done[i] => {} // doublon : supprimé
+            Some(i) => {
+                out.push(format!("{} = {}", values[i].0, values[i].1));
+                done[i] = true;
+            }
+            None => out.push(line.to_owned()),
+        }
+    }
+    for (i, (name, value)) in values.iter().enumerate() {
+        if !done[i] {
+            out.push(format!("{name} = {value}"));
+        }
+    }
+    let mut text = out.join("\n");
+    text.push('\n');
+    text
+}
+
+/// Écrit les options dans le fichier `path` (créé s'il n'existe pas).
+pub fn write_options(path: &Path, values: &[(&str, String)]) -> anyhow::Result<()> {
+    let current = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e).with_context(|| path.display().to_string()),
+    };
+    // Valider avant d'écrire : le service doit pouvoir relire le fichier.
+    let text = set_options(&current, values);
+    HostConfig::parse(&text)?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("conf.tmp");
+    std::fs::write(&tmp, text)?;
+    std::fs::rename(&tmp, path).with_context(|| path.display().to_string())
+}
+
 /// Fichier de configuration système.
 pub fn system_config_file() -> PathBuf {
     #[cfg(windows)]
@@ -178,6 +226,26 @@ mod tests {
         assert_eq!(c.relay_only, Some(true));
         assert_eq!(c.clipboard, Some(false));
         assert_eq!(c.file_transfer, None);
+    }
+
+    #[test]
+    fn set_options_keeps_comments_and_replaces_values() {
+        let text = "# en-tête\nserver = ancien:1\n# server_pin = commenté\nclipboard = false\nserver = doublon:2\n";
+        let out = set_options(
+            text,
+            &[
+                ("server", "relay.example.org:21400".into()),
+                ("enroll_token", "abc".into()),
+            ],
+        );
+        assert_eq!(
+            out,
+            "# en-tête\nserver = relay.example.org:21400\n# server_pin = commenté\n\
+             clipboard = false\nenroll_token = abc\n"
+        );
+        let c = HostConfig::parse(&out).unwrap();
+        assert_eq!(c.enroll_token.as_deref(), Some("abc"));
+        assert_eq!(c.clipboard, Some(false));
     }
 
     #[test]

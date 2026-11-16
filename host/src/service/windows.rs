@@ -118,7 +118,7 @@ pub fn uninstall() -> anyhow::Result<()> {
 
 /// `%ProgramData%\Creamote` : accès réservé à SYSTEM et aux
 /// administrateurs (la clé d'identité de la machine y est).
-fn secure_data_dir() -> anyhow::Result<()> {
+pub fn secure_data_dir() -> anyhow::Result<()> {
     let dir = crate::config::program_data();
     std::fs::create_dir_all(&dir)?;
     let status = Command::new("icacls")
