@@ -12,6 +12,7 @@
 //! relay_only = false
 //! clipboard = true
 //! file_transfer = true
+//! auto_update = true
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -30,6 +31,13 @@ pub struct HostConfig {
     pub clipboard: Option<bool>,
     pub file_transfer: Option<bool>,
     pub files_dir: Option<PathBuf>,
+    /// Mise à jour automatique (activée par défaut si une clé est connue).
+    pub auto_update: Option<bool>,
+    /// Manifeste de mise à jour (miroir interne, par exemple).
+    pub update_url: Option<String>,
+    /// Clé publique de mise à jour (format minisign ou Tauri), à la place de
+    /// celle du projet (version recompilée par l'organisation).
+    pub update_pubkey: Option<String>,
 }
 
 impl HostConfig {
@@ -61,6 +69,9 @@ impl HostConfig {
                 "clipboard" => c.clipboard = flag()?,
                 "file_transfer" => c.file_transfer = flag()?,
                 "files_dir" => c.files_dir = text().map(PathBuf::from),
+                "auto_update" => c.auto_update = flag()?,
+                "update_url" => c.update_url = text(),
+                "update_pubkey" => c.update_pubkey = text(),
                 other => tracing::warn!("option inconnue ignorée : {other}"),
             }
         }

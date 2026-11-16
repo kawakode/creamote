@@ -1,0 +1,11 @@
+[Unit]
+Description=Creamote host : vérification des mises à jour
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=6h
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -3,5 +3,8 @@
 set -e
 if command -v systemctl >/dev/null 2>&1; then
     systemctl --global enable creamote-host.service >/dev/null 2>&1 || true
+    # Mise à jour automatique (désactivable : auto_update = false).
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl enable --now creamote-host-update.timer >/dev/null 2>&1 || true
 fi
 echo "Creamote host : configurez /etc/creamote/host.conf, il démarrera à la prochaine ouverture de session."

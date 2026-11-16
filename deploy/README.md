@@ -65,6 +65,7 @@ enroll_token = <jeton créé dans la console>
 # relay_only = false
 # clipboard = true
 # file_transfer = true
+# auto_update = true           (mise à jour signée toutes les 6 h, voir docs/release.md)
 ```
 
 Le service se reconnecte seul si le serveur redémarre. Fonctionnement et limites par système : [ADR 0004](../docs/adr/0004-host-service.md).

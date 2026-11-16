@@ -15,11 +15,13 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 mod config;
 mod consent;
 mod service;
+mod update;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -101,6 +103,13 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Vérifie la présence d'une nouvelle version signée et l'installe
+    /// (droits administrateur requis). Lancé périodiquement par le service.
+    Update {
+        /// Vérifie seulement, sans installer.
+        #[arg(long)]
+        check: bool,
+    },
     /// Service lancé au démarrage (droits administrateur requis).
     Service {
         #[command(subcommand)]
@@ -187,6 +196,14 @@ impl Settings {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if let Some(Command::Update { check }) = &args.command {
+        let path = args
+            .config
+            .clone()
+            .unwrap_or_else(config::system_config_file);
+        let cfg = HostConfig::load(&path)?;
+        return tokio::runtime::Runtime::new()?.block_on(update::run(&cfg, !check));
+    }
     if let Some(Command::Service { action }) = &args.command {
         return match action {
             ServiceAction::Install => service::install(),
@@ -204,6 +221,50 @@ fn main() -> anyhow::Result<()> {
         .init();
     let settings = Settings::resolve(args)?;
     tokio::runtime::Runtime::new()?.block_on(run(settings))
+}
+
+/// Sessions en cours (on ne redémarre pas pour une mise à jour pendant
+/// une session).
+static ACTIVE_SESSIONS: AtomicUsize = AtomicUsize::new(0);
+
+struct ActiveSession;
+
+impl ActiveSession {
+    fn start() -> Self {
+        ACTIVE_SESSIONS.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for ActiveSession {
+    fn drop(&mut self) {
+        ACTIVE_SESSIONS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// macOS et Linux : le paquet a remplacé le binaire (mise à jour) ; on
+/// s'arrête hors session et launchd ou systemd relance la nouvelle version.
+/// (Sous Windows, l'installeur arrête le service, qui arrête le host.)
+#[cfg(unix)]
+async fn exit_when_replaced() {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let stamp = || {
+        std::fs::metadata(&exe)
+            .ok()
+            .map(|m| (m.ino(), m.len(), m.mtime()))
+    };
+    let initial = stamp();
+    loop {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        let now = stamp();
+        if now.is_some() && now != initial && ACTIVE_SESSIONS.load(Ordering::SeqCst) == 0 {
+            println!("Nouvelle version installée : redémarrage.");
+            std::process::exit(0);
+        }
+    }
 }
 
 /// Délais entre deux tentatives de connexion en mode service.
@@ -224,6 +285,8 @@ async fn run(settings: Settings) -> anyhow::Result<()> {
     if !settings.service {
         return connect_and_serve(&settings, &identity).await;
     }
+    #[cfg(unix)]
+    tokio::spawn(exit_when_replaced());
     // Mode service : on ne s'arrête jamais, le serveur peut redémarrer ou le
     // réseau disparaître.
     let mut delay = RETRY_MIN;
@@ -495,6 +558,7 @@ async fn serve(
                 let connector = rv.connector();
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
+                    let _active = ActiveSession::start();
                     let who = expected.device_id().to_string();
                     match session(connector, grant, expected, policy, &ctx).await {
                         Ok(s) => println!("Session avec {who} terminée ({:?}).", s.granted),
