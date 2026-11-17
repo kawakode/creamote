@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Profil PPPC (MDM) pour le host Creamote sous macOS : autorise
+  l'Accessibilité (injection clavier/souris) sans intervention de
+  l'utilisateur. Remplacer TEAMID par l'identifiant d'équipe Apple qui
+  signe les paquets (docs/release.md).
+
+  L'enregistrement de l'écran (ScreenCapture) ne peut pas être accordé par
+  MDM : Apple permet seulement de laisser un utilisateur standard
+  l'autoriser (Authorization = AllowStandardUserToSetSystemService).
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>PayloadContent</key>
+  <array>
+    <dict>
+      <key>PayloadType</key>
+      <string>com.apple.TCC.configuration-profile-policy</string>
+      <key>PayloadIdentifier</key>
+      <string>org.creamote.host.pppc.tcc</string>
+      <key>PayloadUUID</key>
+      <string>B8A357C9-6C10-4BAB-BA18-74B1540C0F82</string>
+      <key>PayloadVersion</key>
+      <integer>1</integer>
+      <key>PayloadDisplayName</key>
+      <string>Creamote Host</string>
+      <key>Services</key>
+      <dict>
+        <key>Accessibility</key>
+        <array>
+          <dict>
+            <key>Identifier</key>
+            <string>/Library/Application Support/Creamote/creamote-host</string>
+            <key>IdentifierType</key>
+            <string>path</string>
+            <key>CodeRequirement</key>
+            <string>identifier "org.creamote.host" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] and certificate leaf[field.1.2.840.113635.100.6.1.13] and certificate leaf[subject.OU] = "TEAMID"</string>
+            <key>Authorization</key>
+            <string>Allow</string>
+          </dict>
+        </array>
+        <key>ScreenCapture</key>
+        <array>
+          <dict>
+            <key>Identifier</key>
+            <string>/Library/Application Support/Creamote/creamote-host</string>
+            <key>IdentifierType</key>
+            <string>path</string>
+            <key>CodeRequirement</key>
+            <string>identifier "org.creamote.host" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] and certificate leaf[field.1.2.840.113635.100.6.1.13] and certificate leaf[subject.OU] = "TEAMID"</string>
+            <key>Authorization</key>
+            <string>AllowStandardUserToSetSystemService</string>
+          </dict>
+        </array>
+      </dict>
+    </dict>
+  </array>
+  <key>PayloadDisplayName</key>
+  <string>Creamote Host : autorisations</string>
+  <key>PayloadIdentifier</key>
+  <string>org.creamote.host.pppc</string>
+  <key>PayloadScope</key>
+  <string>System</string>
+  <key>PayloadType</key>
+  <string>Configuration</string>
+  <key>PayloadUUID</key>
+  <string>3ACE2A52-8834-47B7-9F50-CB2601D3882A</string>
+  <key>PayloadVersion</key>
+  <integer>1</integer>
+</dict>
+</plist>

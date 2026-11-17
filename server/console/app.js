@@ -748,13 +748,21 @@ async function devicesTab(ctx) {
           const t = await post(`${base}/enrollment-tokens`, {
             fleet_id: d.fleet_id, uses: Number(d.uses), ttl_hours: Number(d.ttl_hours),
           });
-          const cmd = `creamote-host --server ${server} --server-pin ${info.server_pin} --enroll ${t.token} --name "<nom de la machine>"`;
+          const pin = info.server_pin;
+          const commands = [
+            ["Windows (MSI, en silence : GPO, Intune, SCCM…)",
+              `msiexec /i creamote-host-x64.msi /qn SERVER=${server} SERVER_PIN=${pin} ENROLL_TOKEN=${t.token}`],
+            ["macOS et Linux, après installation du paquet (Jamf, MDM, Ansible…)",
+              `sudo creamote-host configure --server ${server} --server-pin ${pin} --enroll-token ${t.token}`],
+            ["Host lancé à la main",
+              `creamote-host --server ${server} --server-pin ${pin} --enroll ${t.token} --name "<nom de la machine>"`],
+          ];
           await render();
           const slot = document.getElementById("new-token");
           slot?.replaceChildren(
             h("div", { class: "banner info", role: "status" },
-              "Jeton créé. Il ne sera plus affiché : copiez la commande maintenant."),
-            h("pre", {}, cmd));
+              "Jeton créé. Il ne sera plus affiché : copiez les commandes maintenant."),
+            ...commands.flatMap(([label, cmd]) => [h("p", { class: "muted small" }, label), h("pre", {}, cmd)]));
         }) },
           h("label", {}, "Parc", select("fleet_id", fleetOptions(fleets).filter(([id]) => managed.has(id)))),
           h("label", {}, "Machines", h("input", { name: "uses", type: "number", min: 1, max: 1000, value: 1 })),
@@ -762,7 +770,7 @@ async function devicesTab(ctx) {
           h("button", { class: "primary", type: "submit" }, "Créer un jeton")),
         h("div", { id: "new-token" }),
         h("p", { class: "muted small" },
-          "Sur la machine, la commande enrôle le host dans le parc. Il n'accepte ensuite que les sessions autorisées par ticket."))],
+          "Le host s'enrôle dans le parc à son premier démarrage, sous le nom de la machine. Il n'accepte ensuite que les sessions autorisées par ticket. Un jeton pour plusieurs machines sert au déploiement de masse : limitez sa validité."))],
     tokens.length ? [
       h("h2", {}, "Jetons actifs"),
       table(["Parc", "Machines restantes", "Créé", "Expire", ""], tokens.map((t) => [

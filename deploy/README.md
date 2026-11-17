@@ -68,4 +68,4 @@ enroll_token = <jeton créé dans la console>
 # auto_update = true           (mise à jour signée toutes les 6 h, voir docs/release.md)
 ```
 
-Le service se reconnecte seul si le serveur redémarre. Fonctionnement et limites par système : [ADR 0004](../docs/adr/0004-host-service.md).
+Le service se reconnecte seul si le serveur redémarre. `creamote-host configure --server … --enroll-token …` écrit ce fichier ; déploiement sur un parc (MSI silencieux, MDM, Ansible) : [mass/README.md](mass/README.md). Fonctionnement et limites par système : [ADR 0004](../docs/adr/0004-host-service.md).

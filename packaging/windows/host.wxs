@@ -7,6 +7,12 @@
   CreamoteHost (SYSTEM, démarrage automatique), qui lance le host dans la
   session affichée à l'écran. La configuration est lue dans
   %ProgramData%\Creamote\host.conf.
+
+  Déploiement de masse : les propriétés publiques écrivent host.conf avant
+  le démarrage du service (une propriété vide ne change rien) :
+    msiexec /i creamote-host.msi /qn SERVER=relay.example.org:21400 ^
+      SERVER_PIN=<empreinte> ENROLL_TOKEN=<jeton> [HOST_NAME=<nom>] ^
+      [RELAY_ONLY=true] [AUTO_UPDATE=false]
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package Name="Creamote Host"
@@ -18,6 +24,28 @@
     <SummaryInformation Description="Creamote Host : accès à distance sans surveillance" />
     <MajorUpgrade DowngradeErrorMessage="Une version plus récente de Creamote Host est déjà installée." />
     <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="SERVER" Secure="yes" />
+    <Property Id="SERVER_PIN" Secure="yes" />
+    <!-- Masqué dans les journaux d'installation. -->
+    <Property Id="ENROLL_TOKEN" Secure="yes" Hidden="yes" />
+    <Property Id="HOST_NAME" Secure="yes" />
+    <Property Id="RELAY_ONLY" Secure="yes" />
+    <Property Id="AUTO_UPDATE" Secure="yes" />
+
+    <!-- Exécutée sous SYSTEM, après la copie des fichiers et avant le
+         démarrage du service. -->
+    <CustomAction Id="WriteHostConf"
+                  FileRef="HostExe"
+                  ExeCommand="configure --server &quot;[SERVER]&quot; --server-pin &quot;[SERVER_PIN]&quot; --enroll-token &quot;[ENROLL_TOKEN]&quot; --name &quot;[HOST_NAME]&quot; --relay-only &quot;[RELAY_ONLY]&quot; --auto-update &quot;[AUTO_UPDATE]&quot;"
+                  Execute="deferred"
+                  Impersonate="no"
+                  HideTarget="yes"
+                  Return="check" />
+    <InstallExecuteSequence>
+      <Custom Action="WriteHostConf" Before="StartServices"
+              Condition="NOT REMOVE AND (SERVER OR SERVER_PIN OR ENROLL_TOKEN OR HOST_NAME OR RELAY_ONLY OR AUTO_UPDATE)" />
+    </InstallExecuteSequence>
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="Creamote Host">
