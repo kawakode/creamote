@@ -10,6 +10,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod sharing;
+mod update;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -566,10 +567,19 @@ fn main() {
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
-    tauri::Builder::default()
+    let context = tauri::generate_context!();
+    let updates = update::enabled(&context);
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
-        .setup(|app| {
+        .plugin(tauri_plugin_opener::init());
+    if updates {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    }
+    builder
+        .setup(move |app| {
+            if updates {
+                update::spawn_check(app.handle().clone());
+            }
             let dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&dir)?;
             let (identity, _) = store::load_or_create(&dir.join("creamote-client.identity"))?;
@@ -608,7 +618,7 @@ fn main() {
             cancel_file,
             open_downloads
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("démarrage de l'application");
 }
 

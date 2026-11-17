@@ -183,6 +183,7 @@ fn run_service() -> anyhow::Result<()> {
     if let Err(e) = secure_data_dir() {
         tracing::warn!("droits de %ProgramData%\\Creamote : {e:#}");
     }
+    std::thread::spawn(update_loop);
     let exe = std::env::current_exe()?;
     let mut agent: Option<(u32, Agent)> = None;
     loop {
@@ -208,6 +209,23 @@ fn run_service() -> anyhow::Result<()> {
     drop(agent);
     set(ServiceState::Stopped, ServiceControlAccept::empty())?;
     Ok(())
+}
+
+/// Vérifie les mises à jour 10 minutes après le démarrage, puis toutes les
+/// 6 heures. L'installeur arrête et relance lui-même le service.
+fn update_loop() {
+    std::thread::sleep(Duration::from_secs(600));
+    let Ok(rt) = tokio::runtime::Runtime::new() else {
+        return;
+    };
+    loop {
+        let cfg = crate::config::HostConfig::load(&crate::config::system_config_file())
+            .unwrap_or_default();
+        if let Err(e) = rt.block_on(crate::update::run(&cfg, true)) {
+            tracing::warn!("mise à jour : {e:#}");
+        }
+        std::thread::sleep(crate::update::INTERVAL);
+    }
 }
 
 /// Host lancé dans une session utilisateur ; terminé quand il est détruit.

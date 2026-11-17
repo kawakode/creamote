@@ -17,12 +17,20 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Clé publique de mise à jour (variable du dépôt UPDATE_PUBKEY, format
+  # Tauri) : intégrée au host et au client. Vide = pas de mise à jour auto.
+  CREAMOTE_UPDATE_PUBKEY: ${{ vars.UPDATE_PUBKEY }}
+  # Clé privée correspondante : signe les paquets du client pour le greffon
+  # updater de Tauri, et les manifestes.
+  TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.UPDATE_PRIVATE_KEY }}
+  TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.UPDATE_PRIVATE_KEY_PASSWORD }}
 
 jobs:
   version:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
+      tauri-config: ${{ steps.tauri.outputs.config }}
     steps:
       - uses: actions/checkout@v4
       - id: v
@@ -35,6 +43,21 @@ jobs:
             test "$GITHUB_REF_NAME" = "v$version" || { echo "étiquette $GITHUB_REF_NAME ≠ v$version"; exit 1; }
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      - id: tauri
+        name: configuration de mise à jour du client
+        run: |
+          if [ -n "$CREAMOTE_UPDATE_PUBKEY" ]; then
+            jq -cn --arg key "$CREAMOTE_UPDATE_PUBKEY" --arg repo "$GITHUB_REPOSITORY" '{
+              bundle: { createUpdaterArtifacts: true },
+              plugins: { updater: {
+                pubkey: $key,
+                endpoints: ["https://github.com/\($repo)/releases/latest/download/client-latest.json"]
+              } }
+            }' > tauri-update.json
+          else
+            echo '{}' > tauri-update.json
+          fi
+          echo "config=$(cat tauri-update.json)" >> "$GITHUB_OUTPUT"
 
   linux:
     needs: version
@@ -69,11 +92,13 @@ jobs:
           tar -C target/release -czf "dist/creamote-cli-$VERSION-linux-x86_64.tar.gz" creamote-cli
       - name: client (deb, rpm, AppImage)
         working-directory: client/src-tauri
+        env:
+          TAURI_CONFIG: ${{ needs.version.outputs.tauri-config }}
         run: |
           cargo install tauri-cli --version "^2" --locked
-          cargo tauri build
+          cargo tauri build --config "$TAURI_CONFIG"
           cp target/release/bundle/deb/*.deb target/release/bundle/rpm/*.rpm \
-            target/release/bundle/appimage/*.AppImage ../../dist/
+            target/release/bundle/appimage/*.AppImage* ../../dist/
       - uses: actions/upload-artifact@v4
         with:
           name: linux
@@ -130,8 +155,10 @@ jobs:
       - name: paquets du client (MSI, NSIS)
         working-directory: client/src-tauri
         shell: pwsh
+        env:
+          TAURI_CONFIG: ${{ needs.version.outputs.tauri-config }}
         run: |
-          cargo tauri bundle
+          cargo tauri bundle --config "$env:TAURI_CONFIG"
           Copy-Item target/release/bundle/msi/*.msi, target/release/bundle/nsis/*.exe ../../dist/
       - name: signature des installeurs
         if: env.SIGN == 'true'
@@ -226,10 +253,15 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_CONFIG: ${{ needs.version.outputs.tauri-config }}
         run: |
           cargo install tauri-cli --version "^2" --locked
-          cargo tauri build --target universal-apple-darwin --bundles dmg
-          cp target/universal-apple-darwin/release/bundle/dmg/*.dmg ../../dist/
+          cargo tauri build --target universal-apple-darwin --config "$TAURI_CONFIG"
+          bundle=target/universal-apple-darwin/release/bundle
+          cp "$bundle"/dmg/*.dmg ../../dist/
+          if [ -f "$bundle/macos/Creamote.app.tar.gz" ]; then
+            cp "$bundle/macos/Creamote.app.tar.gz" "../../dist/Creamote_${VERSION}_universal.app.tar.gz"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: macos
@@ -268,6 +300,28 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - uses: actions/checkout@v4
+        with:
+          path: src
+      - uses: dtolnay/rust-toolchain@stable
+        if: env.TAURI_SIGNING_PRIVATE_KEY != ''
+      - name: manifestes de mise à jour signés
+        if: env.TAURI_SIGNING_PRIVATE_KEY != ''
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          TAG: ${{ github.ref_type == 'tag' && github.ref_name || format('v{0}', needs.version.outputs.version) }}
+        run: |
+          cargo install tauri-cli --version "^2" --locked
+          rm -f dist/*.sig
+          # Signatures refaites sur les fichiers finaux (les installeurs
+          # Windows sont signés Authenticode après la construction).
+          for f in "dist/Creamote_${VERSION}_x64-setup.exe" \
+                   "dist/Creamote_${VERSION}_universal.app.tar.gz" \
+                   "dist/Creamote_${VERSION}_amd64.AppImage"; do
+            cargo tauri signer sign "$f"
+          done
+          python3 -I src/tools/release-manifest.py dist "$GITHUB_REPOSITORY" "$TAG" "$VERSION"
+          cargo tauri signer sign dist/host-latest.json
       - name: empreintes SHA-256
         working-directory: dist
         run: sha256sum * > SHA256SUMS && cat SHA256SUMS

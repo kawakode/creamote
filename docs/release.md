@@ -52,3 +52,29 @@ Le host est signé avec le runtime renforcé et l'identifiant `org.creamote.host
 ### Linux
 
 Pas de signature de paquet pour l'instant : `SHA256SUMS` accompagne la release. Un dépôt APT/RPM signé pourra venir ensuite.
+
+## Mise à jour automatique
+
+Le host et le client se mettent à jour seuls quand la release est construite avec une **clé de mise à jour** (format minisign, celui du greffon updater de Tauri). Sans elle, aucune mise à jour automatique n'est proposée.
+
+Créer la clé une fois, hors du dépôt :
+
+```sh
+cargo install tauri-cli --version "^2" --locked
+cargo tauri signer generate -w creamote-update.key   # demande un mot de passe
+```
+
+| Où | Nom | Contenu |
+| --- | --- | --- |
+| Variable du dépôt (Settings > Secrets and variables > Actions > Variables) | `UPDATE_PUBKEY` | contenu de `creamote-update.key.pub` |
+| Secret | `UPDATE_PRIVATE_KEY` | contenu de `creamote-update.key` |
+| Secret | `UPDATE_PRIVATE_KEY_PASSWORD` | son mot de passe |
+
+Conservez la clé privée hors ligne : la perdre empêche de publier des mises à jour aux installations existantes, la divulguer permettrait d'en publier de fausses. Les deux (variable et secrets) vont ensemble : une clé publique sans clé privée fait échouer la construction du client.
+
+La release publie alors :
+
+- `host-latest.json` et sa signature `host-latest.json.sig` : version, URL et SHA-256 de chaque paquet du host. Le host vérifie la signature du manifeste avec la clé intégrée, n'accepte qu'une version **strictement plus récente**, vérifie l'empreinte du paquet et lance l'installeur du système (`msiexec`, `installer`, `dpkg`, `rpm`). La vérification tourne toutes les 6 heures avec les droits d'administration : dans le service sous Windows, par le démon launchd `org.creamote.host.update` sous macOS et le timer systemd `creamote-host-update.timer` sous Linux. Après la mise à jour, le host de chaque session redémarre dès qu'aucune session n'est en cours.
+- `client-latest.json` : manifeste du greffon updater de Tauri. Le client vérifie au démarrage et propose l'installation.
+
+Côté machines, `auto_update = false` dans `host.conf` désactive la mise à jour du host, et `update_url` désigne un miroir interne (par exemple pour valider une version avant de la diffuser au parc). `creamote-host update --check` indique si une version est disponible.
