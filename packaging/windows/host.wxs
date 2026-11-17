@@ -1,0 +1,49 @@
+<!--
+  Installeur MSI du host Creamote (WiX 5).
+    wix build packaging/windows/host.wxs -arch x64 -d Version=0.2.0 \
+      -d HostExe=target/release/creamote-host.exe -o creamote-host.msi
+
+  Installe le binaire dans « Program Files\Creamote Host » et le service
+  CreamoteHost (SYSTEM, démarrage automatique), qui lance le host dans la
+  session affichée à l'écran. La configuration est lue dans
+  %ProgramData%\Creamote\host.conf.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Creamote Host"
+           Manufacturer="Creamote"
+           Version="$(var.Version)"
+           UpgradeCode="A20FEAB4-673E-42D7-BCA0-36708570890C"
+           Scope="perMachine"
+           Compressed="yes">
+    <SummaryInformation Description="Creamote Host : accès à distance sans surveillance" />
+    <MajorUpgrade DowngradeErrorMessage="Une version plus récente de Creamote Host est déjà installée." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Creamote Host">
+        <Component Id="HostService">
+          <File Id="HostExe" Source="$(var.HostExe)" Name="creamote-host.exe" KeyPath="yes" />
+          <ServiceInstall Id="HostServiceInstall"
+                          Name="CreamoteHost"
+                          DisplayName="Creamote Host"
+                          Description="Rend cette machine accessible à distance avec Creamote."
+                          Type="ownProcess"
+                          Start="auto"
+                          ErrorControl="normal"
+                          Account="LocalSystem"
+                          Arguments="service run" />
+          <ServiceControl Id="HostServiceControl"
+                          Name="CreamoteHost"
+                          Start="install"
+                          Stop="both"
+                          Remove="uninstall"
+                          Wait="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="Creamote Host">
+      <ComponentRef Id="HostService" />
+    </Feature>
+  </Package>
+</Wix>

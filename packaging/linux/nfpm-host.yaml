@@ -1,0 +1,45 @@
+# Paquets .deb et .rpm du host (nfpm, https://nfpm.goreleaser.com).
+#   VERSION=0.2.0 ARCH=amd64 nfpm package -f packaging/linux/nfpm-host.yaml -p deb -t dist/
+name: creamote-host
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: net
+priority: optional
+maintainer: Creamote <https://github.com/kawakode/creamote>
+description: |
+  Host Creamote : rend cette machine contrôlable à distance, chiffré de
+  bout en bout. Démarre dans chaque session graphique (X11 ou Wayland).
+vendor: Creamote
+homepage: https://github.com/kawakode/creamote
+license: AGPL-3.0-only
+recommends:
+  - zenity
+overrides:
+  deb:
+    depends:
+      - libpipewire-0.3-0t64 | libpipewire-0.3-0
+  rpm:
+    depends:
+      - pipewire-libs
+contents:
+  - src: target/release/creamote-host
+    dst: /usr/bin/creamote-host
+    file_info:
+      mode: 0755
+  - src: packaging/linux/creamote-host.service
+    dst: /usr/lib/systemd/user/creamote-host.service
+    file_info:
+      mode: 0644
+  - src: packaging/linux/host.conf
+    dst: /etc/creamote/host.conf
+    type: config|noreplace
+    file_info:
+      mode: 0644
+  - src: LICENSE
+    dst: /usr/share/doc/creamote-host/copyright
+    file_info:
+      mode: 0644
+scripts:
+  postinstall: packaging/linux/postinst.sh
+  preremove: packaging/linux/prerm.sh

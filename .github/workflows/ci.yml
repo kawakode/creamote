@@ -160,3 +160,45 @@ jobs:
           sleep 3
           docker logs crs
           docker logs crs | grep -q "Empreinte"
+
+  packaging:
+    name: paquets du host (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: dépendances PipeWire (Wayland)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpipewire-0.3-dev libclang-dev
+      - run: cargo build --release --locked -p creamote-host
+      - name: deb et rpm
+        if: runner.os == 'Linux'
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.41.1
+          mkdir -p dist
+          for fmt in deb rpm; do
+            VERSION=0.0.0 ARCH=amd64 "$(go env GOPATH)/bin/nfpm" package -f packaging/linux/nfpm-host.yaml -p "$fmt" -t dist/
+          done
+          dpkg-deb --info dist/*.deb
+          dpkg-deb --contents dist/*.deb | grep -q usr/lib/systemd/user/creamote-host.service
+      - name: MSI
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          wix build packaging/windows/host.wxs -arch x64 -d Version=0.0.0 `
+            -d HostExe=target/release/creamote-host.exe -o creamote-host.msi
+          Get-Item creamote-host.msi
+      - name: pkg (non signé)
+        if: runner.os == 'macOS'
+        run: |
+          packaging/macos/build-pkg.sh target/release/creamote-host 0.0.0 creamote-host.pkg
+          pkgutil --expand creamote-host.pkg expanded
+          ls -R expanded | grep -q Payload

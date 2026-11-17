@@ -178,6 +178,11 @@ fn run_service() -> anyhow::Result<()> {
         ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
     )?;
 
+    // Aussi quand le service est installé par le MSI plutôt que par
+    // `service install`.
+    if let Err(e) = secure_data_dir() {
+        tracing::warn!("droits de %ProgramData%\\Creamote : {e:#}");
+    }
     let exe = std::env::current_exe()?;
     let mut agent: Option<(u32, Agent)> = None;
     loop {
