@@ -95,6 +95,33 @@ pub(crate) trait Backend {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn native_backend(display: &DisplayInfo) -> Result<Box<dyn Backend>> {
+    #[cfg(feature = "wayland")]
+    if creamote_capture::wayland::active() {
+        return Ok(Box::new(portal::Portal::open(display)?));
+    }
+    let _ = display;
+    Ok(Box::new(xtest::XTest::open()?))
+}
+
+#[cfg(windows)]
+fn native_backend(_display: &DisplayInfo) -> Result<Box<dyn Backend>> {
+    Ok(Box::new(win::SendInput::open()))
+}
+
+#[cfg(target_os = "macos")]
+fn native_backend(_display: &DisplayInfo) -> Result<Box<dyn Backend>> {
+    Ok(Box::new(mac::CgEvents::open()?))
+}
+
+/// Android : l'injection passe par l'AccessibilityService de l'app
+/// (`creamote-mobile`), pas par ce crate.
+#[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
+fn native_backend(_display: &DisplayInfo) -> Result<Box<dyn Backend>> {
+    Err(InputError::Unsupported(std::env::consts::OS.into()))
+}
+
 /// Injecte les événements d'un viewer sur un écran du host, en suivant les
 /// touches et boutons enfoncés pour tout relâcher en fin de session.
 pub struct Injector {
@@ -108,21 +135,7 @@ pub struct Injector {
 impl Injector {
     /// Ouvre l'injection pour l'écran capturé `display`.
     pub fn open(display: DisplayInfo) -> Result<Self> {
-        #[cfg(all(target_os = "linux", feature = "wayland"))]
-        let backend: Box<dyn Backend> = if creamote_capture::wayland::active() {
-            Box::new(portal::Portal::open(&display)?)
-        } else {
-            Box::new(xtest::XTest::open()?)
-        };
-        #[cfg(all(target_os = "linux", not(feature = "wayland")))]
-        let backend: Box<dyn Backend> = Box::new(xtest::XTest::open()?);
-        #[cfg(windows)]
-        let backend: Box<dyn Backend> = Box::new(win::SendInput::open());
-        #[cfg(target_os = "macos")]
-        let backend: Box<dyn Backend> = Box::new(mac::CgEvents::open()?);
-        #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
-        let backend: Box<dyn Backend> =
-            return Err(InputError::Unsupported(std::env::consts::OS.into()));
+        let backend = native_backend(&display)?;
         Ok(Self::with_backend(backend, display))
     }
 
@@ -228,10 +241,10 @@ fn finite(v: f32) -> f32 {
 
 /// Accumule des crans fractionnaires et rend les crans entiers à émettre.
 #[derive(Default)]
-#[cfg_attr(windows, allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 pub(crate) struct WheelAccumulator(f32, f32);
 
-#[cfg_attr(windows, allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), allow(dead_code))]
 impl WheelAccumulator {
     pub(crate) fn add(&mut self, dx: f32, dy: f32) -> (i32, i32) {
         self.0 += dx;

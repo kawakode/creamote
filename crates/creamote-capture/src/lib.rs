@@ -6,6 +6,7 @@
 //! | macOS | ScreenCaptureKit (12.3+) | curseur inclus, autorisation « Enregistrement de l'écran » |
 //! | Linux X11 | MIT-SHM (repli `GetImage`), XFixes pour le curseur | |
 //! | Linux Wayland | portail `RemoteDesktop`/`ScreenCast` + PipeWire | boîte du portail, puis jeton de restauration |
+//! | Android | MediaProjection, dans l'app Kotlin (`android/`) | ce crate renvoie `Unsupported` |
 //!
 //! Les images sont livrées en BGRA 8 bits en mémoire, prêtes pour
 //! l'encodeur. Le zéro-copie GPU → encodeur viendra avec le débit adaptatif.
@@ -27,6 +28,12 @@ use dxgi as platform;
 use sck as platform;
 #[cfg(target_os = "linux")]
 use x11 as platform;
+// Android (MediaProjection, côté Kotlin) et autres OS : pas de capture native
+// depuis Rust ; l'app fournit ses propres sources au host.
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+mod unsupported;
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+use unsupported as platform;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CaptureError {
@@ -153,7 +160,7 @@ pub fn open(display_id: Option<u32>) -> Result<Box<dyn Capturer>> {
 
 /// Copie `height` lignes de `width * 4` octets depuis un tampon de pas
 /// `src_stride` vers un tampon compact.
-#[cfg_attr(target_os = "linux", allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 pub(crate) fn copy_rows(src: &[u8], src_stride: usize, width: u32, height: u32) -> Vec<u8> {
     let row = width as usize * 4;
     let mut out = Vec::with_capacity(row * height as usize);

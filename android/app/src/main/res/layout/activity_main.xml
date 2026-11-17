@@ -1,0 +1,170 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fitsSystemWindows="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/my_id"
+            android:textAppearance="?android:attr/textAppearanceSmall" />
+
+        <TextView
+            android:id="@+id/myId"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textIsSelectable="true"
+            android:textSize="32sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/myFingerprint"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textAppearance="?android:attr/textAppearanceSmall"
+            android:textIsSelectable="true" />
+
+        <TextView
+            style="@style/Section"
+            android:text="@string/connect_section" />
+
+        <EditText
+            android:id="@+id/targetId"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/target_id"
+            android:importantForAutofill="no"
+            android:inputType="number"
+            android:maxLength="11" />
+
+        <CheckBox
+            android:id="@+id/viewOnly"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/view_only" />
+
+        <Button
+            android:id="@+id/connect"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/connect" />
+
+        <TextView
+            android:id="@+id/status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingTop="8dp" />
+
+        <TextView
+            style="@style/Section"
+            android:text="@string/share_section" />
+
+        <Switch
+            android:id="@+id/share"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/share_switch" />
+
+        <TextView
+            android:id="@+id/hostStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
+        <TextView
+            android:id="@+id/accessibility"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingTop="8dp" />
+
+        <Button
+            android:id="@+id/openAccessibility"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/open_accessibility" />
+
+        <EditText
+            android:id="@+id/deviceName"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/device_name"
+            android:importantForAutofill="no"
+            android:inputType="text" />
+
+        <EditText
+            android:id="@+id/enrollToken"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/enroll_token"
+            android:importantForAutofill="no"
+            android:inputType="textPassword" />
+
+        <LinearLayout
+            android:id="@+id/knoxGroup"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <TextView
+                style="@style/Section"
+                android:text="@string/knox_section" />
+
+            <EditText
+                android:id="@+id/knoxKey"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="@string/knox_key"
+                android:importantForAutofill="no"
+                android:inputType="textPassword" />
+
+            <Button
+                android:id="@+id/knoxActivate"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/knox_activate" />
+        </LinearLayout>
+
+        <TextView
+            style="@style/Section"
+            android:text="@string/server_section" />
+
+        <EditText
+            android:id="@+id/serverAddress"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/server_address"
+            android:importantForAutofill="no"
+            android:inputType="textUri" />
+
+        <EditText
+            android:id="@+id/serverPin"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/server_pin"
+            android:importantForAutofill="no"
+            android:inputType="text|textNoSuggestions" />
+
+        <EditText
+            android:id="@+id/apiUrl"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/api_url"
+            android:importantForAutofill="no"
+            android:inputType="textUri" />
+
+        <EditText
+            android:id="@+id/apiToken"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/api_token"
+            android:importantForAutofill="no"
+            android:inputType="textPassword" />
+    </LinearLayout>
+</ScrollView>

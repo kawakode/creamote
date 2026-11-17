@@ -11,3 +11,7 @@ android/.gradle/
 android/build/
 android/app/build/
 android/local.properties
+android/*/build/
+android/.kotlin/
+android/*/.kotlin/
+android/jvm-tests/.gradle/

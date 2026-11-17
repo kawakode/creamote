@@ -5,7 +5,7 @@ use std::sync::{Arc, mpsc as std_mpsc};
 use std::time::{Duration, Instant};
 
 use creamote_capture::{Capturer, DisplayInfo, Frame};
-use creamote_codec::{EncoderConfig, Preference, VideoEncoder};
+use creamote_codec::{EncodedFrame, EncoderConfig, Preference, VideoEncoder};
 use creamote_input::{Injector, Pointer};
 use creamote_net::secure::{SecureReceiver, SecureSender};
 use creamote_proto::permissions::Permissions;
@@ -88,6 +88,38 @@ type DisplaysFn = dyn Fn() -> creamote_capture::Result<Vec<DisplayInfo>> + Send 
 type CapturerFn = dyn Fn(Option<u32>) -> creamote_capture::Result<Box<dyn Capturer>> + Send + Sync;
 type InjectorFn = dyn Fn(DisplayInfo) -> Result<Box<dyn InputSink>, String> + Send + Sync;
 
+/// Paramètres d'ouverture d'une [`EncodedSource`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceRequest {
+    /// Écran demandé par le viewer (`None` : l'écran principal).
+    pub display_id: Option<u32>,
+    pub fps: u32,
+    /// Débit demandé par le viewer ; 0 : au choix de la source.
+    pub bitrate_bps: u32,
+}
+
+/// Source vidéo qui capture **et** encode elle-même, sans passer d'images
+/// brutes par Rust. Android : MediaProjection rend dans la surface d'entrée
+/// d'un encodeur MediaCodec (zéro copie). Le host garde le contrôle de flux,
+/// le débit adaptatif et le découpage.
+pub trait EncodedSource: Send {
+    fn display(&self) -> DisplayInfo;
+    /// Nom de l'encodeur, ex. « MediaCodec c2.qti.avc.encoder ».
+    fn name(&self) -> String;
+    /// Dimensions des images produites (peuvent changer : rotation).
+    fn size(&self) -> (u32, u32);
+    /// Débit courant de l'encodeur.
+    fn bitrate(&self) -> u32;
+    /// Prochaine image encodée, au plus `timeout` ; `Ok(None)` : rien de
+    /// nouveau. Une erreur met fin à la diffusion.
+    fn next(&mut self, timeout: Duration) -> Result<Option<EncodedFrame>, String>;
+    fn request_keyframe(&mut self);
+    fn set_bitrate(&mut self, bps: u32);
+}
+
+type EncodedSourceFn =
+    dyn Fn(SourceRequest) -> Result<Box<dyn EncodedSource>, String> + Send + Sync;
+
 /// Sources et puits du host ; remplaçables pour les tests.
 #[derive(Clone)]
 pub struct Media {
@@ -95,6 +127,9 @@ pub struct Media {
     pub capturer: Arc<CapturerFn>,
     pub injector: Arc<InjectorFn>,
     pub encoder: Preference,
+    /// Source déjà encodée : remplace `capturer` et `encoder` quand elle est
+    /// fournie.
+    pub encoded: Option<Arc<EncodedSourceFn>>,
     /// Plafond du débit vidéo en bit/s, 0 = aucun (ex. : plafond du relay
     /// public quand la session passe par lui).
     pub max_bitrate_bps: u32,
@@ -112,6 +147,27 @@ impl Media {
                     .map_err(|e| e.to_string())
             }),
             encoder,
+            encoded: None,
+            max_bitrate_bps: 0,
+        }
+    }
+
+    /// Host dont la vidéo vient d'une [`EncodedSource`] (Android).
+    pub fn encoded(
+        displays: Arc<DisplaysFn>,
+        source: Arc<EncodedSourceFn>,
+        injector: Arc<InjectorFn>,
+    ) -> Self {
+        Self {
+            displays,
+            capturer: Arc::new(|_| {
+                Err(creamote_capture::CaptureError::Unsupported(
+                    "source vidéo déjà encodée".into(),
+                ))
+            }),
+            injector,
+            encoder: Preference::Auto,
+            encoded: Some(source),
             max_bitrate_bps: 0,
         }
     }
@@ -389,7 +445,18 @@ impl Stream {
             std::thread::Builder::new()
                 .name("creamote-video".into())
                 .spawn(move || {
-                    if let Err(msg) = video_loop(&req, &media, &ctl, &out, display_tx) {
+                    let r = match &media.encoded {
+                        Some(open) => encoded_loop(
+                            &req,
+                            open.as_ref(),
+                            media.max_bitrate_bps,
+                            &ctl,
+                            &out,
+                            display_tx,
+                        ),
+                        None => video_loop(&req, &media, &ctl, &out, display_tx),
+                    };
+                    if let Err(msg) = r {
                         tracing::warn!("diffusion interrompue : {msg}");
                         let _ = out.blocking_send(end(EndReason::Error, msg));
                     }
@@ -448,6 +515,112 @@ fn input_loop(
     // `Injector` relâche touches et boutons à sa destruction.
 }
 
+fn requested_fps(req: &pb::VideoConfig) -> u32 {
+    match req.max_fps {
+        0 => DEFAULT_FPS,
+        f => f.clamp(1, 60),
+    }
+}
+
+/// Diffusion depuis une [`EncodedSource`] : même contrôle de flux et même
+/// débit adaptatif que [`video_loop`], sans capture ni encodage ici.
+fn encoded_loop(
+    req: &pb::VideoConfig,
+    open: &EncodedSourceFn,
+    max_bitrate_bps: u32,
+    ctl: &StreamCtl,
+    out: &mpsc::Sender<Kind>,
+    display_tx: std_mpsc::Sender<DisplayInfo>,
+) -> Result<(), String> {
+    let fps = requested_fps(req);
+    let cap = match max_bitrate_bps {
+        0 => u32::MAX,
+        m => m.max(MIN_BITRATE),
+    };
+    let bitrate_bps = match req.target_bitrate_bps {
+        0 if cap == u32::MAX => 0,
+        0 => cap,
+        b => b.clamp(200_000, 50_000_000).min(cap),
+    };
+    let request = |display_id| SourceRequest {
+        display_id,
+        fps,
+        bitrate_bps,
+    };
+    // Écran inconnu (configuration changée) : l'écran principal.
+    let mut src = open(request(Some(req.display_id))).or_else(|_| open(request(None)))?;
+    let display = src.display();
+    let _ = display_tx.send(display.clone());
+    if src.bitrate() > cap {
+        src.set_bitrate(cap);
+    }
+    let start = Instant::now();
+    let mut config: Option<pb::VideoConfig> = None;
+    let mut rate = RateController::new(src.bitrate().min(cap), start);
+    let mut sent: u64 = 0;
+    src.request_keyframe();
+
+    while !ctl.stop.load(Ordering::Relaxed) {
+        if sent.saturating_sub(ctl.acked.load(Ordering::Relaxed)) >= MAX_FRAMES_IN_FLIGHT {
+            std::thread::sleep(Duration::from_millis(2));
+            continue;
+        }
+        if ctl.keyframe.swap(false, Ordering::Relaxed) {
+            src.request_keyframe();
+        }
+        for (id, at) in ctl.acks.lock().expect("verrou sain").drain(..) {
+            rate.on_ack(id, at);
+        }
+        if let Some(bps) = rate.tick(Instant::now()) {
+            tracing::info!(kbit_s = bps / 1000, "débit adaptatif");
+            src.set_bitrate(bps);
+            if let Some(c) = &mut config {
+                c.target_bitrate_bps = bps;
+                if out.blocking_send(Kind::VideoConfig(c.clone())).is_err() {
+                    return Ok(());
+                }
+            }
+        }
+        let Some(frame) = src.next(Duration::from_millis(100))? else {
+            continue;
+        };
+        // Première image, ou dimensions changées (rotation) : nouvelle
+        // configuration avant l'image, qui est alors une image clé.
+        let (width, height) = src.size();
+        if config
+            .as_ref()
+            .is_none_or(|c| (c.width, c.height) != (width, height))
+        {
+            let c = pb::VideoConfig {
+                display_id: display.id,
+                codec: pb::video_config::Codec::H264 as i32,
+                width,
+                height,
+                target_bitrate_bps: rate.bitrate(),
+                max_fps: fps,
+                encoder: src.name(),
+            };
+            if out.blocking_send(Kind::VideoConfig(c.clone())).is_err() {
+                return Ok(());
+            }
+            config = Some(c);
+        }
+        let now = Instant::now();
+        sent += 1;
+        rate.on_sent(sent, frame.data.len(), now);
+        let ts = frame
+            .captured_at
+            .saturating_duration_since(start)
+            .as_micros() as u64;
+        for c in chunks(display.id, sent, frame.keyframe, ts, &frame.data) {
+            if out.blocking_send(Kind::VideoChunk(c)).is_err() {
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn video_loop(
     req: &pb::VideoConfig,
     media: &Media,
@@ -462,10 +635,7 @@ fn video_loop(
     let mut display = capturer.display().clone();
     let _ = display_tx.send(display.clone());
     let mut reopened: Option<Instant> = None;
-    let fps = match req.max_fps {
-        0 => DEFAULT_FPS,
-        f => f.clamp(1, 60),
-    };
+    let fps = requested_fps(req);
     let interval = Duration::from_secs(1) / fps;
     let start = Instant::now();
     let mut encoder: Option<creamote_codec::Chain> = None;

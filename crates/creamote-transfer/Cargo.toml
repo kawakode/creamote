@@ -14,8 +14,11 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["fs"] }
 tracing.workspace = true
 png.workspace = true
+
 # Presse-papier natif : Win32 (OpenClipboard), NSPasteboard (macOS),
-# sélections X11 et protocole data-control de Wayland.
+# sélections X11 et protocole data-control de Wayland. Android : fourni par
+# l'app (ClipboardManager).
+[target.'cfg(not(target_os = "android"))'.dependencies]
 arboard.workspace = true
 
 [target.'cfg(windows)'.dependencies]
